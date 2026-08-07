@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.5)
 project(csms_cpp CXX)
 
+enable_testing()
+
 include(CheckIncludeFileCXX)
 
 check_include_file_cxx(any HAS_ANY)
