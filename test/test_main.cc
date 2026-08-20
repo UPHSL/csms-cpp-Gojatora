@@ -1,7 +1,59 @@
 #define DROGON_TEST_MAIN
 #include <drogon/drogon_test.h>
 #include <drogon/drogon.h>
+#include "../models/Resident.h"
 
+// Test 1: Resident Creation
+// Verifies that a Resident can be created using valid Resident information.
+DROGON_TEST(ResidentCreationTest)
+{
+    Resident resident(1,
+                       "Adrian Paolo",
+                       "Follante",
+                       "Kinnari Phase 1, Lantic, Carmona, Cavite",
+                       "09763214551",
+                       "adrian.paolo@example.com",
+                       ResidentStatus::Active);
+
+    CHECK(resident.getId() == 1);
+    CHECK(resident.getFirstName() == "Adrian Paolo");
+    CHECK(resident.getLastName() == "Follante");
+}
+
+// Test 2: Resident Information Access
+// Verifies that Resident information can be assigned and retrieved correctly.
+DROGON_TEST(ResidentInformationAccessTest)
+{
+    Resident resident;
+
+    resident.setId(2);
+    resident.setFirstName("Wilmar");
+    resident.setLastName("Lipata");
+    resident.setAddress("Kinnari Phase 2, Lantic, Carmona, Cavite");
+    resident.setContactNumber("09179876543");
+    resident.setEmail("wilmar.lipata@example.com");
+    resident.setStatus(ResidentStatus::Active);
+
+    CHECK(resident.getId() == 2);
+    CHECK(resident.getFirstName() == "Wilmar");
+    CHECK(resident.getLastName() == "Lipata");
+    CHECK(resident.getAddress() == "Kinnari Phase 2, Lantic, Carmona, Cavite");
+    CHECK(resident.getContactNumber() == "09179876543");
+    CHECK(resident.getEmail() == "wilmar.lipata@example.com");
+}
+
+// Test 3: Resident Status
+// Verifies that the Resident model can represent the "Active" status.
+DROGON_TEST(ResidentStatusTest)
+{
+    Resident resident;
+    resident.setStatus(ResidentStatus::Active);
+
+    CHECK(resident.getStatus() == ResidentStatus::Active);
+    CHECK(residentStatusToString(resident.getStatus()) == "Active");
+}
+
+// Keeping the original starter test so existing behavior is preserved.
 DROGON_TEST(BasicTest)
 {
     // Add your tests here
