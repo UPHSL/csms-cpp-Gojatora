@@ -4,7 +4,34 @@
 #include "../models/Resident.h"
 #include "../models/ResidentValidator.h"
 
-// Test 1: Resident Creation
+#include "../database/Database.h"
+#include "../repositories/ResidentRepository.h"
+
+#include <filesystem>
+#include <cstdio>
+
+// Creates a fresh, uniquely-named temporary SQLite file path for a test.
+// Using a unique name per test (via a counter) avoids tests interfering
+// with each other, and avoids leftover data from a previous test run.
+std::string makeTempDbPath(const std::string &testName)
+{
+    static int counter = 0;
+    counter++;
+
+    std::filesystem::path tempDir = std::filesystem::temp_directory_path();
+    std::filesystem::path dbPath = tempDir / ("csms_test_" + testName + "_" + std::to_string(counter) + ".sqlite3");
+
+    // Remove any leftover file from a previous run, if it exists,
+    // so each test starts from a clean, empty database.
+    if (std::filesystem::exists(dbPath))
+    {
+        std::filesystem::remove(dbPath);
+    }
+
+    return dbPath.string();
+}
+
+// T01 Required Test 1: Resident Creation
 // Verifies that a Resident can be created using valid Resident information.
 DROGON_TEST(ResidentCreationTest)
 {
@@ -21,7 +48,7 @@ DROGON_TEST(ResidentCreationTest)
     CHECK(resident.getLastName() == "Follante");
 }
 
-// Test 2: Resident Information Access
+// T01 Required Test 2: Resident Information Access
 // Verifies that Resident information can be assigned and retrieved correctly.
 DROGON_TEST(ResidentInformationAccessTest)
 {
@@ -43,7 +70,7 @@ DROGON_TEST(ResidentInformationAccessTest)
     CHECK(resident.getEmail() == "wilmar.lipata@example.com");
 }
 
-// Test 3: Resident Status
+// T01 Required Test 3: Resident Status
 // Verifies that the Resident model can represent the "Active" status.
 DROGON_TEST(ResidentStatusTest)
 {
@@ -54,7 +81,7 @@ DROGON_TEST(ResidentStatusTest)
     CHECK(residentStatusToString(resident.getStatus()) == "Active");
 }
 
-// Test 4: Valid Resident information passes validation
+// T02 Required Test 1: Valid Resident information passes validation
 DROGON_TEST(ValidResidentInformationPassesValidationTest)
 {
     Resident resident(1,
@@ -69,7 +96,7 @@ DROGON_TEST(ValidResidentInformationPassesValidationTest)
     CHECK(validator.isValid(resident));
 }
 
-// Test 5: Missing first name fails validation
+// T02 Required Test 2: Missing first name fails validation
 DROGON_TEST(MissingFirstNameFailsValidationTest)
 {
     Resident resident(1,
@@ -87,7 +114,7 @@ DROGON_TEST(MissingFirstNameFailsValidationTest)
     CHECK(std::find(errors.begin(), errors.end(), "firstName") != errors.end());
 }
 
-// Test 6: Missing last name fails validation
+// T02 Required Test 3: Missing last name fails validation
 DROGON_TEST(MissingLastNameFailsValidationTest)
 {
     Resident resident(1,
@@ -105,7 +132,7 @@ DROGON_TEST(MissingLastNameFailsValidationTest)
     CHECK(std::find(errors.begin(), errors.end(), "lastName") != errors.end());
 }
 
-// Test 7: Missing address fails validation
+// T02 Required Test 4: Missing address fails validation
 DROGON_TEST(MissingAddressFailsValidationTest)
 {
     Resident resident(1,
@@ -123,7 +150,7 @@ DROGON_TEST(MissingAddressFailsValidationTest)
     CHECK(std::find(errors.begin(), errors.end(), "address") != errors.end());
 }
 
-// Test 8: Whitespace-only required information fails validation
+// T02 Required Test 5: Whitespace-only required information fails validation
 DROGON_TEST(WhitespaceOnlyRequiredInformationFailsValidationTest)
 {
     Resident resident(1,
@@ -141,7 +168,7 @@ DROGON_TEST(WhitespaceOnlyRequiredInformationFailsValidationTest)
     CHECK(std::find(errors.begin(), errors.end(), "firstName") != errors.end());
 }
 
-// Test 9: Invalid contact number fails validation
+// T02 Required Test 6: Invalid contact number fails validation
 DROGON_TEST(InvalidContactNumberFailsValidationTest)
 {
     Resident resident(1,
@@ -159,7 +186,7 @@ DROGON_TEST(InvalidContactNumberFailsValidationTest)
     CHECK(std::find(errors.begin(), errors.end(), "contactNumber") != errors.end());
 }
 
-// Test 10: Invalid email fails validation
+// T02 Required Test 7: Invalid email fails validation
 DROGON_TEST(InvalidEmailFailsValidationTest)
 {
     Resident resident(1,
@@ -177,7 +204,7 @@ DROGON_TEST(InvalidEmailFailsValidationTest)
     CHECK(std::find(errors.begin(), errors.end(), "email") != errors.end());
 }
 
-// Test 11: Supported statuses (Active and Inactive) pass validation
+// T02 Required Test 8: Supported statuses (Active and Inactive) pass validation
 DROGON_TEST(SupportedResidentStatusesPassValidationTest)
 {
     Resident activeResident(1,
@@ -202,7 +229,7 @@ DROGON_TEST(SupportedResidentStatusesPassValidationTest)
     CHECK(validator.isValid(inactiveResident));
 }
 
-// Test 12: Unsupported status fails validation
+// T02 Required Test 9: Unsupported status fails validation
 // Since ResidentStatus is an enum class, we simulate an invalid/unexpected
 // value using static_cast — similar to how corrupted or unexpected data
 // (e.g. from a database) might arrive in a real system.
@@ -223,6 +250,208 @@ DROGON_TEST(UnsupportedResidentStatusFailsValidationTest)
 
     CHECK(!validator.isValid(resident));
     CHECK(std::find(errors.begin(), errors.end(), "status") != errors.end());
+}
+
+// Regression test (not part of T03's required scenarios): confirms the
+// Resident model still creates residents with no id (std::nullopt) before
+// persistence, after the id_ type was changed from int to std::optional<int>.
+DROGON_TEST(NewResidentHasNoIdBeforePersistenceTest)
+{
+    Resident resident("Adrian Paolo",
+                       "Follante",
+                       "Barangay Lantic, Carmona, Cavite",
+                       "09763214551",
+                       "adrian.paolo@example.com",
+                       ResidentStatus::Active);
+
+    CHECK(!resident.getId().has_value());
+}
+
+// T03 Required Test 1: Persist a Resident
+DROGON_TEST(PersistAResidentTest)
+{
+    Database db(makeTempDbPath("persist"));
+    ResidentRepository repository(db);
+
+    Resident newResident("Adrian Paolo",
+                          "Follante",
+                          "Barangay Lantic, Carmona, Cavite",
+                          "09763214551",
+                          "adrian.paolo@example.com",
+                          ResidentStatus::Active);
+
+    Resident saved = repository.save(newResident);
+
+    // If save() completed without throwing, and returned a Resident, we succeeded.
+    CHECK(saved.getFirstName() == "Adrian Paolo");
+}
+
+// T03 Required Test 2: Resident receives an identifier
+DROGON_TEST(ResidentReceivesAnIdentifierTest)
+{
+    Database db(makeTempDbPath("receives_id"));
+    ResidentRepository repository(db);
+
+    Resident newResident("Wilmar",
+                          "Lipata",
+                          "Barangay 1 Carmona, Cavite",
+                          "09181234567",
+                          "wilmar.lipata@example.com",
+                          ResidentStatus::Active);
+
+    // Before persistence, the T01 behavior applies: no id yet.
+    CHECK(!newResident.getId().has_value());
+
+    Resident saved = repository.save(newResident);
+
+    // After persistence, SQLite must have assigned a real, usable id.
+    CHECK(saved.getId().has_value());
+}
+
+// T03 Required Test 3: Retrieve Resident by identifier
+DROGON_TEST(RetrieveResidentByIdentifierTest)
+{
+    Database db(makeTempDbPath("retrieve_by_id"));
+    ResidentRepository repository(db);
+
+    Resident newResident("Aaron",
+                          "Cuartero",
+                          "Barangay 5 Binan, Laguna",
+                          "09191234567",
+                          "aaron@example.com",
+                          ResidentStatus::Active);
+
+    Resident saved = repository.save(newResident);
+    int savedId = saved.getId().value();
+
+    std::optional<Resident> found = repository.findById(savedId);
+
+    CHECK(found.has_value());
+    CHECK(found->getId().value() == savedId);
+    CHECK(found->getFirstName() == "Aaron");
+}
+
+// T03 Required Test 4: Resident information is preserved
+DROGON_TEST(ResidentInformationIsPreservedTest)
+{
+    Database db(makeTempDbPath("info_preserved"));
+    ResidentRepository repository(db);
+
+    Resident newResident("Dominie",
+                          "Cruz",
+                          "Barangay Bancal, Carmona, Cavite",
+                          "09201234567",
+                          "dominie@example.com",
+                          ResidentStatus::Active);
+
+    Resident saved = repository.save(newResident);
+    std::optional<Resident> found = repository.findById(saved.getId().value());
+
+    CHECK(found.has_value());
+    CHECK(found->getFirstName() == "Dominie");
+    CHECK(found->getLastName() == "Cruz");
+    CHECK(found->getAddress() == "Barangay Bancal, Carmona, Cavite");
+    CHECK(found->getContactNumber() == "09201234567"); // leading zero preserved
+    CHECK(found->getEmail() == "dominie@example.com");
+}
+
+// T03 Required Test 5: Active status is preserved
+DROGON_TEST(ActiveStatusIsPreservedTest)
+{
+    Database db(makeTempDbPath("status_preserved"));
+    ResidentRepository repository(db);
+
+    Resident newResident("Carlo",
+                          "Villanueva",
+                          "Barangay San Isidro, Carmona, Cavite",
+                          "09211234567",
+                          "carlo@example.com",
+                          ResidentStatus::Active);
+
+    Resident saved = repository.save(newResident);
+    std::optional<Resident> found = repository.findById(saved.getId().value());
+
+    CHECK(found.has_value());
+    CHECK(found->getStatus() == ResidentStatus::Active);
+}
+
+// T03 Required Test 6: Missing Resident is handled safely
+DROGON_TEST(MissingResidentIsHandledTest)
+{
+    Database db(makeTempDbPath("missing_resident"));
+    ResidentRepository repository(db);
+
+    std::optional<Resident> found = repository.findById(999999);
+
+    CHECK(!found.has_value());
+}
+
+// T03 Required Test 7: Persistence is not limited to one repository object
+DROGON_TEST(PersistenceSurvivesNewRepositoryInstanceTest)
+{
+    std::string dbPath = makeTempDbPath("shared_file");
+
+    int savedId;
+    {
+        // First Database/repository instance: save a Resident, then let
+        // this scope end (simulating "finished using the first repository").
+        Database firstDb(dbPath);
+        ResidentRepository firstRepository(firstDb);
+
+        Resident newResident("Liza",
+                              "Fernandez",
+                              "Barangay Balibago, Carmona, Cavite",
+                              "09221234567",
+                              "liza@example.com",
+                              ResidentStatus::Active);
+
+        Resident saved = firstRepository.save(newResident);
+        savedId = saved.getId().value();
+    }
+
+    // Second, completely separate Database/repository instance,
+    // connected to the SAME file on disk.
+    Database secondDb(dbPath);
+    ResidentRepository secondRepository(secondDb);
+
+    std::optional<Resident> found = secondRepository.findById(savedId);
+
+    // If this passes, the data truly lives in the SQLite file,
+    // not just inside one in-memory C++ object.
+    CHECK(found.has_value());
+    CHECK(found->getFirstName() == "Liza");
+}
+
+// Student-designed test: Contact number's leading zero survives a full
+// save + retrieve round trip through SQLite.
+//
+// Why this scenario: contact_number is stored as TEXT specifically to
+// preserve the leading "0" in numbers like "09171234567". If a future
+// change accidentally stored it as an INTEGER column, or someone
+// mistakenly used sqlite3_bind_int instead of sqlite3_bind_text, SQLite
+// would silently strip the leading zero (storing it as 9171234567).
+// This test exists specifically to catch that class of regression,
+// which would otherwise be easy to miss since the value would still
+// "look like a number" and other fields would be unaffected.
+DROGON_TEST(ContactNumberLeadingZeroSurvivesRoundTripTest)
+{
+    Database db(makeTempDbPath("leading_zero"));
+    ResidentRepository repository(db);
+
+    Resident newResident("Klaire",
+                          "Torres",
+                          "Barangay Langkaan I, Dasmarinas, Cavite",
+                          "09001234567",
+                          "klaire@example.com",
+                          ResidentStatus::Active);
+
+    Resident saved = repository.save(newResident);
+    std::optional<Resident> found = repository.findById(saved.getId().value());
+
+    CHECK(found.has_value());
+    CHECK(found->getContactNumber() == "09001234567");
+    CHECK(found->getContactNumber().length() == 11);
+    CHECK(found->getContactNumber()[0] == '0');
 }
 
 // Keeping the original starter test so existing behavior is preserved.

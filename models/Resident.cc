@@ -35,8 +35,25 @@ Resident::Resident(int id,
 {
 }
 
+// new/unsaved constructor
+Resident::Resident(const std::string &firstName,
+                    const std::string &lastName,
+                    const std::string &address,
+                    const std::string &contactNumber,
+                    const std::string &email,
+                    ResidentStatus status)
+    : id_(std::nullopt),
+      firstName_(firstName),
+      lastName_(lastName),
+      address_(address),
+      contactNumber_(contactNumber),
+      email_(email),
+      status_(status)
+{
+}
+
 // --- Getters ---
-int Resident::getId() const { return id_; }
+std::optional<int> Resident::getId() const { return id_; }
 std::string Resident::getFirstName() const { return firstName_; }
 std::string Resident::getLastName() const { return lastName_; }
 std::string Resident::getAddress() const { return address_; }
