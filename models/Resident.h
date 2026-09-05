@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <optional>
 
 // Represents the possible states a Resident can be in.
 // Using an enum class (instead of a plain string) prevents typos like
@@ -24,7 +25,8 @@ public:
     // Default constructor (creates an "empty" Resident).
     Resident() = default;
 
-    // Constructor that initializes all fields at once.
+    // Constructor used when the id is already known
+    // (e.g. reconstructing a Resident retrieved from the database).
     Resident(int id,
             const std::string &firstName,
             const std::string &lastName,
@@ -34,8 +36,18 @@ public:
             ResidentStatus status
             );
 
+    // Constructor for a brand-new Resident that hasn't been saved yet.
+    // No id is provided — id_ defaults to std::nullopt.
+    Resident(const std::string &firstName,
+            const std::string &lastName,
+            const std::string &address,
+            const std::string &contactNumber,
+            const std::string &email,
+            ResidentStatus status
+            );
+
     // --- Getters: read the value of a field ---
-    int getId() const;
+    std::optional<int> getId() const;
     std::string getFirstName() const;
     std::string getLastName() const;
     std::string getAddress() const;
@@ -53,7 +65,7 @@ public:
     void setStatus(ResidentStatus status);
 
 private:
-    int id_ = 0;
+    std::optional<int> id_ ; // optional, can be null
     std::string firstName_;
     std::string lastName_;
     std::string address_;
