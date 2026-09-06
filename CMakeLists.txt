@@ -27,6 +27,7 @@ add_executable(${PROJECT_NAME}
     controllers/HealthController.cc
     database/Database.cc
     repositories/ResidentRepository.cc
+    services/ResidentRegistrationService.cc
 )
 
 # ##############################################################################
