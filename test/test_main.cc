@@ -7,6 +7,9 @@
 #include "../database/Database.h"
 #include "../repositories/ResidentRepository.h"
 
+#include "../services/ResidentRegistrationService.h"
+#include <sqlite3.h>
+
 #include <filesystem>
 #include <cstdio>
 
@@ -452,6 +455,198 @@ DROGON_TEST(ContactNumberLeadingZeroSurvivesRoundTripTest)
     CHECK(found->getContactNumber() == "09001234567");
     CHECK(found->getContactNumber().length() == 11);
     CHECK(found->getContactNumber()[0] == '0');
+}
+
+// valid-Resident helper
+Resident makeValidResidentForRegistration()
+{
+    return Resident("Juan",
+                     "Dela Cruz",
+                     "Barangay Santo Tomas",
+                     "09171234567",
+                     "juan@example.com",
+                     ResidentStatus::Active);
+}
+
+// Directly queries SQLite to count Resident rows, bypassing our own
+// repository — used to prove invalid Residents never reach the database,
+// rather than just trusting the registration result's return value.
+int countResidentsInDatabase(const std::string &databasePath)
+{
+    sqlite3 *database = nullptr;
+    sqlite3_open(databasePath.c_str(), &database);
+
+    const char *sql = "SELECT COUNT(*) FROM residents";
+    sqlite3_stmt *statement = nullptr;
+    sqlite3_prepare_v2(database, sql, -1, &statement, nullptr);
+    sqlite3_step(statement);
+
+    int count = sqlite3_column_int(statement, 0);
+
+    sqlite3_finalize(statement);
+    sqlite3_close(database);
+
+    return count;
+}
+
+// T04 Required Test 1: Register a valid Resident
+DROGON_TEST(RegisterValidResidentTest)
+{
+    Database db(makeTempDbPath("register_valid"));
+    ResidentRepository repository(db);
+    ResidentValidator validator;
+    ResidentRegistrationService service(validator, repository);
+
+    Resident resident = makeValidResidentForRegistration();
+
+    ResidentRegistrationResult result = service.registerResident(resident);
+
+    CHECK(result.success);
+    CHECK(result.resident.has_value());
+    CHECK(result.errors.empty());
+}
+
+// T04 Required Test 2: Registered Resident receives an identifier
+DROGON_TEST(RegisteredResidentReceivesIdentifierTest)
+{
+    Database db(makeTempDbPath("register_id"));
+    ResidentRepository repository(db);
+    ResidentValidator validator;
+    ResidentRegistrationService service(validator, repository);
+
+    Resident resident = makeValidResidentForRegistration();
+    CHECK(!resident.getId().has_value());
+
+    ResidentRegistrationResult result = service.registerResident(resident);
+
+    CHECK(result.success);
+    CHECK(result.resident->getId().has_value());
+}
+
+// T04 Required Test 3: Registered Resident is actually persisted
+DROGON_TEST(RegisteredResidentIsPersistedTest)
+{
+    Database db(makeTempDbPath("register_persisted"));
+    ResidentRepository repository(db);
+    ResidentValidator validator;
+    ResidentRegistrationService service(validator, repository);
+
+    Resident resident = makeValidResidentForRegistration();
+    ResidentRegistrationResult result = service.registerResident(resident);
+
+    CHECK(result.success);
+    int residentId = result.resident->getId().value();
+
+    std::optional<Resident> stored = repository.findById(residentId);
+    CHECK(stored.has_value());
+}
+
+// T04 Required Test 4: Registered Resident information is preserved
+DROGON_TEST(RegisteredResidentInformationIsPreservedTest)
+{
+    Database db(makeTempDbPath("register_info"));
+    ResidentRepository repository(db);
+    ResidentValidator validator;
+    ResidentRegistrationService service(validator, repository);
+
+    Resident resident = makeValidResidentForRegistration();
+    ResidentRegistrationResult result = service.registerResident(resident);
+
+    CHECK(result.success);
+    int residentId = result.resident->getId().value();
+
+    std::optional<Resident> stored = repository.findById(residentId);
+    CHECK(stored.has_value());
+    CHECK(stored->getFirstName() == "Juan");
+    CHECK(stored->getLastName() == "Dela Cruz");
+    CHECK(stored->getAddress() == "Barangay Santo Tomas");
+    CHECK(stored->getContactNumber() == "09171234567");
+    CHECK(stored->getEmail() == "juan@example.com");
+    CHECK(stored->getStatus() == ResidentStatus::Active);
+}
+
+// T04 Required Test 5: Default Active status is preserved through registration
+DROGON_TEST(RegisteredResidentPreservesDefaultActiveStatusTest)
+{
+    Database db(makeTempDbPath("register_status"));
+    ResidentRepository repository(db);
+    ResidentValidator validator;
+    ResidentRegistrationService service(validator, repository);
+
+    Resident resident = makeValidResidentForRegistration();
+    CHECK(resident.getStatus() == ResidentStatus::Active);
+
+    ResidentRegistrationResult result = service.registerResident(resident);
+
+    CHECK(result.success);
+    CHECK(result.resident->getStatus() == ResidentStatus::Active);
+}
+
+// T04 Required Test 6: Invalid Resident registration fails
+DROGON_TEST(InvalidResidentRegistrationFailsTest)
+{
+    Database db(makeTempDbPath("register_invalid"));
+    ResidentRepository repository(db);
+    ResidentValidator validator;
+    ResidentRegistrationService service(validator, repository);
+
+    Resident invalidResident("",
+                              "Dela Cruz",
+                              "Barangay Santo Tomas",
+                              "09171234567",
+                              "juan@example.com",
+                              ResidentStatus::Active);
+
+    ResidentRegistrationResult result = service.registerResident(invalidResident);
+
+    CHECK(!result.success);
+    CHECK(!result.resident.has_value());
+    CHECK(!result.errors.empty());
+}
+
+// T04 Required Test 7: Invalid Resident is not persisted
+DROGON_TEST(InvalidResidentIsNotPersistedTest)
+{
+    std::string dbPath = makeTempDbPath("register_not_persisted");
+    Database db(dbPath);
+    ResidentRepository repository(db);
+    ResidentValidator validator;
+    ResidentRegistrationService service(validator, repository);
+
+    Resident invalidResident("",
+                              "Dela Cruz",
+                              "Barangay Santo Tomas",
+                              "09171234567",
+                              "juan@example.com",
+                              ResidentStatus::Active);
+
+    int countBefore = countResidentsInDatabase(dbPath);
+    ResidentRegistrationResult result = service.registerResident(invalidResident);
+    int countAfter = countResidentsInDatabase(dbPath);
+
+    CHECK(!result.success);
+    CHECK(countAfter == countBefore);
+}
+
+// T04 Required Test 8: Validation failure can be identified
+DROGON_TEST(RegistrationReturnsValidationErrorsTest)
+{
+    Database db(makeTempDbPath("register_errors"));
+    ResidentRepository repository(db);
+    ResidentValidator validator;
+    ResidentRegistrationService service(validator, repository);
+
+    Resident invalidResident("",
+                              "Dela Cruz",
+                              "Barangay Santo Tomas",
+                              "09171234567",
+                              "juan@example.com",
+                              ResidentStatus::Active);
+
+    ResidentRegistrationResult result = service.registerResident(invalidResident);
+
+    CHECK(!result.success);
+    CHECK(std::find(result.errors.begin(), result.errors.end(), "firstName") != result.errors.end());
 }
 
 // Keeping the original starter test so existing behavior is preserved.
