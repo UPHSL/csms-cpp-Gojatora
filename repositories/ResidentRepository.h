@@ -1,6 +1,7 @@
 #pragma once
 
 #include <optional>
+#include <vector>
 
 #include "../database/Database.h"
 #include "../models/Resident.h"
@@ -24,10 +25,15 @@ public:
     // Returns std::nullopt if no matching Resident exists.
     std::optional<Resident> findById(int residentId);
 
+    std::vector<Resident> findAll();
+    std::vector<Resident> searchByName(const std::string &searchTerm);
+
 private:
     Database &database_;
 
     // Converts a ResidentStatus string ("Active"/"Inactive") back into
     // the ResidentStatus enum used by our Resident model.
     ResidentStatus statusFromString(const std::string &value) const;
+
+    Resident mapRowToResident(sqlite3_stmt *statement) const;
 };

@@ -141,3 +141,82 @@ ResidentStatus ResidentRepository::statusFromString(const std::string &value) co
     // we control what gets written via residentStatusToString().
     return ResidentStatus::Active;
 }
+
+// Shared row->Resident conversion, used by findById, findAll, and searchByName.
+Resident ResidentRepository::mapRowToResident(sqlite3_stmt *statement) const
+{
+    int id = sqlite3_column_int(statement, 0);
+    std::string firstName = reinterpret_cast<const char *>(sqlite3_column_text(statement, 1));
+    std::string lastName = reinterpret_cast<const char *>(sqlite3_column_text(statement, 2));
+    std::string address = reinterpret_cast<const char *>(sqlite3_column_text(statement, 3));
+    std::string contactNumber = reinterpret_cast<const char *>(sqlite3_column_text(statement, 4));
+    std::string email = reinterpret_cast<const char *>(sqlite3_column_text(statement, 5));
+    std::string statusText = reinterpret_cast<const char *>(sqlite3_column_text(statement, 6));
+
+    return Resident(id, firstName, lastName, address, contactNumber, email, statusFromString(statusText));
+}
+
+// Returns every Resident, ordered lastName -> firstName -> id (all ascending).
+// COLLATE NOCASE makes the ordering itself case-insensitive too.
+std::vector<Resident> ResidentRepository::findAll()
+{
+    const char *sql =
+        "SELECT id, first_name, last_name, address, contact_number, email, status "
+        "FROM residents "
+        "ORDER BY last_name COLLATE NOCASE ASC, first_name COLLATE NOCASE ASC, id ASC;";
+
+    sqlite3_stmt *statement = nullptr;
+    int prepareResult = sqlite3_prepare_v2(database_.handle(), sql, -1, &statement, nullptr);
+
+    if (prepareResult != SQLITE_OK)
+    {
+        throw std::runtime_error("Failed to prepare findAll statement: " +
+                                  std::string(sqlite3_errmsg(database_.handle())));
+    }
+
+    std::vector<Resident> residents;
+    while (sqlite3_step(statement) == SQLITE_ROW)
+    {
+        residents.push_back(mapRowToResident(statement));
+    }
+
+    sqlite3_finalize(statement);
+    return residents;
+}
+
+// Case-insensitive partial match against firstName OR lastName.
+// SQLite's LIKE is case-insensitive by default for ASCII text, and
+// (a OR b) on a single row can only ever produce that row once, so a
+// Resident matching on both first and last name still appears only once.
+std::vector<Resident> ResidentRepository::searchByName(const std::string &searchTerm)
+{
+    const char *sql =
+        "SELECT id, first_name, last_name, address, contact_number, email, status "
+        "FROM residents "
+        "WHERE first_name LIKE ? OR last_name LIKE ? "
+        "ORDER BY last_name COLLATE NOCASE ASC, first_name COLLATE NOCASE ASC, id ASC;";
+
+    sqlite3_stmt *statement = nullptr;
+    int prepareResult = sqlite3_prepare_v2(database_.handle(), sql, -1, &statement, nullptr);
+
+    if (prepareResult != SQLITE_OK)
+    {
+        throw std::runtime_error("Failed to prepare search statement: " +
+                                  std::string(sqlite3_errmsg(database_.handle())));
+    }
+
+    // Wrap the term in % wildcards for a partial/substring match, and bind
+    // it (never concatenate it into the SQL string directly).
+    std::string pattern = "%" + searchTerm + "%";
+    sqlite3_bind_text(statement, 1, pattern.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(statement, 2, pattern.c_str(), -1, SQLITE_TRANSIENT);
+
+    std::vector<Resident> residents;
+    while (sqlite3_step(statement) == SQLITE_ROW)
+    {
+        residents.push_back(mapRowToResident(statement));
+    }
+
+    sqlite3_finalize(statement);
+    return residents;
+}

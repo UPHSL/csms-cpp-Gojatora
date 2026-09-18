@@ -8,6 +8,7 @@
 #include "../repositories/ResidentRepository.h"
 
 #include "../services/ResidentRegistrationService.h"
+#include "../services/ResidentSearchService.h"
 #include <sqlite3.h>
 
 #include <filesystem>
@@ -647,6 +648,182 @@ DROGON_TEST(RegistrationReturnsValidationErrorsTest)
 
     CHECK(!result.success);
     CHECK(std::find(result.errors.begin(), result.errors.end(), "firstName") != result.errors.end());
+}
+
+// Persists a Resident directly through the repository, for setting up
+// search/listing test scenarios (bypasses registration/validation on
+// purpose, since T05 is testing query behavior, not registration).
+Resident persistResident(ResidentRepository &repository,
+                          const std::string &firstName,
+                          const std::string &lastName,
+                          ResidentStatus status = ResidentStatus::Active)
+{
+    Resident resident(firstName, lastName, "Some Address", "09171234567", "test@example.com", status);
+    return repository.save(resident);
+}
+
+// T05 Required Test 1: List all persisted Residents
+DROGON_TEST(ListAllPersistedResidentsTest)
+{
+    Database db(makeTempDbPath("list_all"));
+    ResidentRepository repository(db);
+    ResidentSearchService service(repository);
+
+    persistResident(repository, "Juan", "Dela Cruz");
+    persistResident(repository, "Maria", "Santos");
+
+    std::vector<Resident> results = service.listResidents();
+
+    CHECK(results.size() == 2);
+}
+
+// T05 Required Test 2: Empty Resident listing
+DROGON_TEST(EmptyResidentListingTest)
+{
+    Database db(makeTempDbPath("list_empty"));
+    ResidentRepository repository(db);
+    ResidentSearchService service(repository);
+
+    std::vector<Resident> results = service.listResidents();
+
+    CHECK(results.empty());
+}
+
+// T05 Required Test 3: Listing uses required ordering (lastName, firstName, id)
+DROGON_TEST(ListingUsesRequiredOrderingTest)
+{
+    Database db(makeTempDbPath("list_order"));
+    ResidentRepository repository(db);
+    ResidentSearchService service(repository);
+
+    // Insert deliberately out of the expected display order.
+    persistResident(repository, "Ana", "Santos");
+    persistResident(repository, "Pedro", "Cruz");
+    persistResident(repository, "Maria", "Andres");
+    persistResident(repository, "Juan", "Cruz");
+
+    std::vector<Resident> results = service.listResidents();
+
+    CHECK(results.size() == 4);
+    // Expected order: Andres, Cruz(Juan), Cruz(Pedro), Santos
+    CHECK(results[0].getLastName() == "Andres");
+    CHECK(results[1].getLastName() == "Cruz");
+    CHECK(results[1].getFirstName() == "Juan");
+    CHECK(results[2].getLastName() == "Cruz");
+    CHECK(results[2].getFirstName() == "Pedro");
+    CHECK(results[3].getLastName() == "Santos");
+}
+
+// T05 Required Test 4: Partial first name search is case-insensitive
+DROGON_TEST(PartialFirstNameSearchIsCaseInsensitiveTest)
+{
+    Database db(makeTempDbPath("search_first_name"));
+    ResidentRepository repository(db);
+    ResidentSearchService service(repository);
+
+    persistResident(repository, "Juan", "Dela Cruz");
+
+    std::vector<Resident> results = service.searchResidents("jUa");
+
+    CHECK(results.size() == 1);
+    CHECK(results[0].getFirstName() == "Juan");
+}
+
+// T05 Required Test 5: Partial last name search is case-insensitive
+DROGON_TEST(PartialLastNameSearchIsCaseInsensitiveTest)
+{
+    Database db(makeTempDbPath("search_last_name"));
+    ResidentRepository repository(db);
+    ResidentSearchService service(repository);
+
+    persistResident(repository, "Juan", "Dela Cruz");
+
+    std::vector<Resident> results = service.searchResidents("cRuZ");
+
+    CHECK(results.size() == 1);
+    CHECK(results[0].getLastName() == "Dela Cruz");
+}
+
+// T05 Required Test 6: Blank search returns all Residents
+DROGON_TEST(BlankSearchReturnsAllResidentsTest)
+{
+    Database db(makeTempDbPath("search_blank"));
+    ResidentRepository repository(db);
+    ResidentSearchService service(repository);
+
+    persistResident(repository, "Juan", "Dela Cruz");
+    persistResident(repository, "Maria", "Santos");
+
+    std::vector<Resident> blankResults = service.searchResidents("   ");
+    std::vector<Resident> listResults = service.listResidents();
+
+    CHECK(blankResults.size() == listResults.size());
+    CHECK(blankResults.size() == 2);
+}
+
+// T05 Required Test 7: Search with no match returns empty collection
+DROGON_TEST(SearchWithNoMatchReturnsEmptyCollectionTest)
+{
+    Database db(makeTempDbPath("search_no_match"));
+    ResidentRepository repository(db);
+    ResidentSearchService service(repository);
+
+    persistResident(repository, "Juan", "Dela Cruz");
+
+    std::vector<Resident> results = service.searchResidents("ZzzUnknownResident");
+
+    CHECK(results.empty());
+}
+
+// T05 Required Test 8: Search results preserve Resident information
+DROGON_TEST(SearchResultsPreserveResidentInformationTest)
+{
+    Database db(makeTempDbPath("search_preserve_info"));
+    ResidentRepository repository(db);
+    ResidentSearchService service(repository);
+
+    Resident resident("Juan", "Dela Cruz", "Barangay Santo Tomas", "09171234567", "juan@example.com", ResidentStatus::Active);
+    repository.save(resident);
+
+    std::vector<Resident> results = service.searchResidents("Juan");
+
+    CHECK(results.size() == 1);
+    CHECK(results[0].getFirstName() == "Juan");
+    CHECK(results[0].getLastName() == "Dela Cruz");
+    CHECK(results[0].getAddress() == "Barangay Santo Tomas");
+    CHECK(results[0].getContactNumber() == "09171234567");
+    CHECK(results[0].getEmail() == "juan@example.com");
+    CHECK(results[0].getStatus() == ResidentStatus::Active);
+}
+
+// T05 Required Test 9: Active and Inactive Residents are both included
+DROGON_TEST(ActiveAndInactiveResidentsAreIncludedTest)
+{
+    Database db(makeTempDbPath("list_status_mix"));
+    ResidentRepository repository(db);
+    ResidentSearchService service(repository);
+
+    persistResident(repository, "Juan", "Dela Cruz", ResidentStatus::Active);
+    persistResident(repository, "Maria", "Santos", ResidentStatus::Inactive);
+
+    std::vector<Resident> results = service.listResidents();
+
+    CHECK(results.size() == 2);
+}
+
+// T05 Required Test 10: Matching Resident is not duplicated
+DROGON_TEST(MatchingResidentIsNotDuplicatedTest)
+{
+    Database db(makeTempDbPath("search_no_duplicate"));
+    ResidentRepository repository(db);
+    ResidentSearchService service(repository);
+
+    // "Cruz" appears in both the first name and last name.
+    persistResident(repository, "Cruzita", "Cruz");
+
+    std::vector<Resident> results = service.searchResidents("Cruz");
+
+    CHECK(results.size() == 1);
 }
 
 // Keeping the original starter test so existing behavior is preserved.
