@@ -55,4 +55,26 @@ void Database::createSchema()
         sqlite3_free(errorMessage);
         throw std::runtime_error("Failed to create residents table: " + message);
     }
+
+    // Stores only the Resident's id (resident_id), never a copy of the
+    // Resident's personal information.
+    const char *serviceRequestsSql =
+        "CREATE TABLE IF NOT EXISTS service_requests ("
+        "    id             INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "    resident_id    INTEGER NOT NULL,"
+        "    service_type   TEXT    NOT NULL,"
+        "    description    TEXT    NOT NULL,"
+        "    date_requested TEXT    NOT NULL,"
+        "    status         TEXT    NOT NULL"
+        ");";
+
+    errorMessage = nullptr;
+    result = sqlite3_exec(db_, serviceRequestsSql, nullptr, nullptr, &errorMessage);
+
+    if (result != SQLITE_OK)
+    {
+        std::string message = errorMessage != nullptr ? errorMessage : "unknown error";
+        sqlite3_free(errorMessage);
+        throw std::runtime_error("Failed to create service_requests table: " + message);
+    }
 }

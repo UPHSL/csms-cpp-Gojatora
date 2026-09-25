@@ -1,5 +1,37 @@
 #include "ServiceRequest.h"
 
+std::string serviceRequestStatusToString(ServiceRequestStatus status)
+{
+    switch (status)
+    {
+        case ServiceRequestStatus::Pending:
+            return "Pending";
+        case ServiceRequestStatus::InProgress:
+            return "In Progress";
+        case ServiceRequestStatus::Completed:
+            return "Completed";
+        case ServiceRequestStatus::Cancelled:
+            return "Cancelled";
+        default:
+            return "Unknown";
+    }
+}
+
+ServiceRequest::ServiceRequest(int id,
+                               int residentId,
+                               const std::string &serviceType,
+                               const std::string &description,
+                               const std::string &dateRequested,
+                               ServiceRequestStatus status)
+    : id_(id),
+      residentId_(residentId),
+      serviceType_(serviceType),
+      description_(description),
+      dateRequested_(dateRequested),
+      status_(status)
+{
+}
+
 ServiceRequest::ServiceRequest(int residentId,
                                const std::string &serviceType,
                                const std::string &description,
