@@ -28,6 +28,11 @@ public:
     std::vector<Resident> findAll();
     std::vector<Resident> searchByName(const std::string &searchTerm);
 
+    // Returns true if a Resident with this id existed and was updated.
+    // Returns false if no Resident with this id exists (nothing changed).
+    // Does NOT modify id or status — only the 5 editable fields.
+    bool update(const Resident &resident);
+
 private:
     Database &database_;
 
@@ -37,3 +42,5 @@ private:
 
     Resident mapRowToResident(sqlite3_stmt *statement) const;
 };
+
+
