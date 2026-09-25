@@ -1,16 +1,19 @@
 #define DROGON_TEST_MAIN
 #include <drogon/drogon_test.h>
 #include <drogon/drogon.h>
+
 #include "../models/Resident.h"
 #include "../models/ResidentValidator.h"
 
 #include "../database/Database.h"
+
 #include "../repositories/ResidentRepository.h"
 
 #include "../services/ResidentRegistrationService.h"
 #include "../services/ResidentSearchService.h"
-#include <sqlite3.h>
+#include "../services/ResidentUpdateService.h"
 
+#include <sqlite3.h>
 #include <filesystem>
 #include <cstdio>
 
@@ -824,6 +827,194 @@ DROGON_TEST(MatchingResidentIsNotDuplicatedTest)
     std::vector<Resident> results = service.searchResidents("Cruz");
 
     CHECK(results.size() == 1);
+}
+
+// T06 Required Test 1: Valid Resident update succeeds
+DROGON_TEST(ValidResidentUpdateSucceedsTest)
+{
+    Database db(makeTempDbPath("update_valid"));
+    ResidentRepository repository(db);
+    ResidentValidator validator;
+    ResidentUpdateService service(validator, repository);
+
+    Resident resident = persistResident(repository, "Juan", "Cruz");
+    int id = resident.getId().value();
+
+    ResidentUpdateResult result = service.updateResident(
+        id, "Juan Miguel", "Dela Cruz", "New Address", "09181234567", "juanmiguel@example.com");
+
+    CHECK(result.success);
+    CHECK(!result.residentNotFound);
+    CHECK(result.errors.empty());
+}
+
+// T06 Required Test 2: Resident ID is preserved
+DROGON_TEST(UpdatePreservesResidentIdTest)
+{
+    Database db(makeTempDbPath("update_preserve_id"));
+    ResidentRepository repository(db);
+    ResidentValidator validator;
+    ResidentUpdateService service(validator, repository);
+
+    Resident resident = persistResident(repository, "Juan", "Cruz");
+    int originalId = resident.getId().value();
+
+    ResidentUpdateResult result = service.updateResident(
+        originalId, "Juan Miguel", "Dela Cruz", "New Address", "09181234567", "juanmiguel@example.com");
+
+    CHECK(result.success);
+    CHECK(result.resident->getId().value() == originalId);
+}
+
+// T06 Required Test 3: Permitted Resident information is persisted
+DROGON_TEST(PermittedResidentInformationIsPersistedTest)
+{
+    Database db(makeTempDbPath("update_info_persisted"));
+    ResidentRepository repository(db);
+    ResidentValidator validator;
+    ResidentUpdateService service(validator, repository);
+
+    Resident resident = persistResident(repository, "Juan", "Cruz");
+    int id = resident.getId().value();
+
+    service.updateResident(id, "Juan Miguel", "Dela Cruz", "New Address", "09181234567", "juanmiguel@example.com");
+
+    std::optional<Resident> stored = repository.findById(id);
+    CHECK(stored.has_value());
+    CHECK(stored->getFirstName() == "Juan Miguel");
+    CHECK(stored->getLastName() == "Dela Cruz");
+    CHECK(stored->getAddress() == "New Address");
+    CHECK(stored->getContactNumber() == "09181234567");
+    CHECK(stored->getEmail() == "juanmiguel@example.com");
+}
+
+// T06 Required Test 4: Resident status is preserved
+DROGON_TEST(UpdatePreservesResidentStatusTest)
+{
+    Database db(makeTempDbPath("update_preserve_status"));
+    ResidentRepository repository(db);
+    ResidentValidator validator;
+    ResidentUpdateService service(validator, repository);
+
+    Resident resident = persistResident(repository, "Juan", "Cruz", ResidentStatus::Inactive);
+    int id = resident.getId().value();
+
+    ResidentUpdateResult result = service.updateResident(
+        id, "Juan Miguel", "Dela Cruz", "New Address", "09181234567", "juanmiguel@example.com");
+
+    CHECK(result.success);
+    CHECK(result.resident->getStatus() == ResidentStatus::Inactive);
+}
+
+// T06 Required Test 5: Invalid update fails
+DROGON_TEST(InvalidUpdateFailsTest)
+{
+    Database db(makeTempDbPath("update_invalid"));
+    ResidentRepository repository(db);
+    ResidentValidator validator;
+    ResidentUpdateService service(validator, repository);
+
+    Resident resident = persistResident(repository, "Juan", "Cruz");
+    int id = resident.getId().value();
+
+    ResidentUpdateResult result = service.updateResident(
+        id, "", "Dela Cruz", "New Address", "09181234567", "juanmiguel@example.com");
+
+    CHECK(!result.success);
+    CHECK(!result.residentNotFound);
+    CHECK(!result.errors.empty());
+}
+
+// T06 Required Test 6: Invalid update does not modify persisted information
+DROGON_TEST(InvalidUpdateDoesNotModifyPersistedInformationTest)
+{
+    Database db(makeTempDbPath("update_invalid_no_change"));
+    ResidentRepository repository(db);
+    ResidentValidator validator;
+    ResidentUpdateService service(validator, repository);
+
+    Resident resident = persistResident(repository, "Juan", "Cruz");
+    int id = resident.getId().value();
+
+    service.updateResident(id, "", "Dela Cruz", "New Address", "09181234567", "juanmiguel@example.com");
+
+    std::optional<Resident> stored = repository.findById(id);
+    CHECK(stored.has_value());
+    CHECK(stored->getFirstName() == "Juan"); // unchanged
+    CHECK(stored->getLastName() == "Cruz");  // unchanged
+}
+
+// T06 Required Test 7: Updating a nonexistent Resident is handled safely
+DROGON_TEST(UpdatingNonexistentResidentIsHandledSafelyTest)
+{
+    Database db(makeTempDbPath("update_not_found"));
+    ResidentRepository repository(db);
+    ResidentValidator validator;
+    ResidentUpdateService service(validator, repository);
+
+    ResidentUpdateResult result = service.updateResident(
+        999999, "Juan", "Cruz", "Some Address", "09171234567", "juan@example.com");
+
+    CHECK(!result.success);
+    CHECK(result.residentNotFound);
+}
+
+// T06 Required Test 8: Nonexistent update does not create a Resident
+DROGON_TEST(NonexistentUpdateDoesNotCreateResidentTest)
+{
+    std::string dbPath = makeTempDbPath("update_not_found_no_create");
+    Database db(dbPath);
+    ResidentRepository repository(db);
+    ResidentValidator validator;
+    ResidentUpdateService service(validator, repository);
+
+    int countBefore = countResidentsInDatabase(dbPath);
+    service.updateResident(999999, "Juan", "Cruz", "Some Address", "09171234567", "juan@example.com");
+    int countAfter = countResidentsInDatabase(dbPath);
+
+    CHECK(countAfter == countBefore);
+}
+
+// T06 Required Test 9: Updated Resident is visible through T05 querying
+DROGON_TEST(UpdatedResidentIsVisibleThroughSearchTest)
+{
+    Database db(makeTempDbPath("update_visible_search"));
+    ResidentRepository repository(db);
+    ResidentValidator validator;
+    ResidentUpdateService updateService(validator, repository);
+    ResidentSearchService searchService(repository);
+
+    Resident resident = persistResident(repository, "Juan", "Cruz");
+    int id = resident.getId().value();
+
+    updateService.updateResident(id, "Miguel", "Santos", "New Address", "09181234567", "miguel@example.com");
+
+    std::vector<Resident> results = searchService.searchResidents("Miguel");
+
+    CHECK(results.size() == 1);
+    CHECK(results[0].getId().value() == id);
+}
+
+// T06 Required Test 10: Updated information and contact number are preserved
+DROGON_TEST(UpdatedContactNumberPreservesLeadingZeroTest)
+{
+    Database db(makeTempDbPath("update_contact_number"));
+    ResidentRepository repository(db);
+    ResidentValidator validator;
+    ResidentUpdateService service(validator, repository);
+
+    Resident resident = persistResident(repository, "Juan", "Cruz");
+    int id = resident.getId().value();
+
+    ResidentUpdateResult result = service.updateResident(
+        id, "Juan", "Cruz", "Some Address", "09181234567", "juan@example.com");
+
+    CHECK(result.success);
+    std::optional<Resident> stored = repository.findById(id);
+    CHECK(stored->getContactNumber() == "09181234567");
+    CHECK(stored->getContactNumber()[0] == '0');
+    CHECK(stored->getId().value() == id);
+    CHECK(stored->getStatus() == ResidentStatus::Active);
 }
 
 // Keeping the original starter test so existing behavior is preserved.

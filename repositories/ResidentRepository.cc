@@ -220,3 +220,43 @@ std::vector<Resident> ResidentRepository::searchByName(const std::string &search
     sqlite3_finalize(statement);
     return residents;
 }
+
+bool ResidentRepository::update(const Resident &resident)
+{
+    const char *sql =
+        "UPDATE residents "
+        "SET first_name = ?, last_name = ?, address = ?, contact_number = ?, email = ? "
+        "WHERE id = ?;";
+
+    sqlite3_stmt *statement = nullptr;
+    int prepareResult = sqlite3_prepare_v2(database_.handle(), sql, -1, &statement, nullptr);
+
+    if (prepareResult != SQLITE_OK)
+    {
+        throw std::runtime_error("Failed to prepare UPDATE statement: " +
+                                  std::string(sqlite3_errmsg(database_.handle())));
+    }
+
+    sqlite3_bind_text(statement, 1, resident.getFirstName().c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(statement, 2, resident.getLastName().c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(statement, 3, resident.getAddress().c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(statement, 4, resident.getContactNumber().c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(statement, 5, resident.getEmail().c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(statement, 6, resident.getId().value());
+
+    int stepResult = sqlite3_step(statement);
+
+    if (stepResult != SQLITE_DONE)
+    {
+        std::string errorMessage = sqlite3_errmsg(database_.handle());
+        sqlite3_finalize(statement);
+        throw std::runtime_error("Failed to update Resident: " + errorMessage);
+    }
+
+    sqlite3_finalize(statement);
+
+    // sqlite3_changes() reports how many rows the most recent statement
+    // actually modified. If the id didn't match any row, this is 0 —
+    // that's how we detect "Resident not found" without a separate query.
+    return sqlite3_changes(database_.handle()) > 0;
+}
