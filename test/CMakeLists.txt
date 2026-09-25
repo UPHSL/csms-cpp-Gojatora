@@ -6,12 +6,15 @@ add_executable(${PROJECT_NAME}
     ../models/Resident.cc
     ../models/ResidentValidator.cc
     ../models/ServiceRequest.cc
+    ../models/ServiceRequestValidator.cc
     ../database/Database.cc
     ../repositories/ResidentRepository.cc
+    ../repositories/ServiceRequestRepository.cc
     ../services/ResidentRegistrationService.cc
     ../services/ResidentSearchService.cc
     ../services/ResidentUpdateService.cc
     ../services/ResidentDeactivationService.cc
+    ../services/ServiceRequestSubmissionService.cc
 )
 
 target_include_directories(${PROJECT_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_SOURCE_DIR}/../models)
