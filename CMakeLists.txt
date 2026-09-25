@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.5)
 project(csms_cpp CXX)
 
+enable_testing()
+
 include(CheckIncludeFileCXX)
 
 check_include_file_cxx(any HAS_ANY)
@@ -23,6 +25,12 @@ add_executable(${PROJECT_NAME}
     main.cc
     controllers/HomeController.cc
     controllers/HealthController.cc
+    database/Database.cc
+    repositories/ResidentRepository.cc
+    services/ResidentRegistrationService.cc
+    services/ResidentSearchService.cc
+    services/ResidentUpdateService.cc
+    services/ResidentDeactivationService.cc
 )
 
 # ##############################################################################
@@ -34,6 +42,8 @@ add_executable(${PROJECT_NAME}
 # and comment out the following lines
 find_package(Drogon CONFIG REQUIRED)
 target_link_libraries(${PROJECT_NAME} PRIVATE Drogon::Drogon)
+
+target_link_libraries(${PROJECT_NAME} PRIVATE SQLite3_lib)
 
 # ##############################################################################
 
