@@ -12,6 +12,7 @@
 #include "../services/ResidentRegistrationService.h"
 #include "../services/ResidentSearchService.h"
 #include "../services/ResidentUpdateService.h"
+#include "../services/ResidentDeactivationService.h"
 
 #include <sqlite3.h>
 #include <filesystem>
@@ -1015,6 +1016,237 @@ DROGON_TEST(UpdatedContactNumberPreservesLeadingZeroTest)
     CHECK(stored->getContactNumber()[0] == '0');
     CHECK(stored->getId().value() == id);
     CHECK(stored->getStatus() == ResidentStatus::Active);
+}
+
+// Persists a Resident with fully known details, for T07 preservation checks.
+Resident persistDetailedResident(ResidentRepository &repository,
+                                  ResidentStatus status = ResidentStatus::Active)
+{
+    Resident resident("Juan",
+                       "Dela Cruz",
+                       "Barangay Santo Tomas",
+                       "09171234567",
+                       "juan@example.com",
+                       status);
+    return repository.save(resident);
+}
+
+// T07 Required Test 1: Active Resident can be deactivated
+DROGON_TEST(ActiveResidentCanBeDeactivatedTest)
+{
+    Database db(makeTempDbPath("deactivate_active"));
+    ResidentRepository repository(db);
+    ResidentDeactivationService service(repository);
+
+    Resident resident = persistDetailedResident(repository);
+
+    ResidentDeactivationResult result = service.deactivateResident(resident.getId().value());
+
+    CHECK(result.success);
+    CHECK(result.stateChanged);
+    CHECK(!result.residentNotFound);
+    CHECK(result.resident.has_value());
+}
+
+// T07 Required Test 2: Status becomes Inactive in actual persistence
+DROGON_TEST(DeactivatedStatusIsPersistedTest)
+{
+    Database db(makeTempDbPath("deactivate_persisted"));
+    ResidentRepository repository(db);
+    ResidentDeactivationService service(repository);
+
+    Resident resident = persistDetailedResident(repository);
+    int id = resident.getId().value();
+
+    service.deactivateResident(id);
+
+    // A brand-new repository on the same connection proves the change is
+    // in the database, not in a temporary application object.
+    ResidentRepository freshRepository(db);
+    std::optional<Resident> stored = freshRepository.findById(id);
+    CHECK(stored.has_value());
+    CHECK(stored->getStatus() == ResidentStatus::Inactive);
+}
+
+// T07 Required Test 3: Resident ID is preserved
+DROGON_TEST(DeactivationPreservesResidentIdTest)
+{
+    Database db(makeTempDbPath("deactivate_preserve_id"));
+    ResidentRepository repository(db);
+    ResidentDeactivationService service(repository);
+
+    Resident resident = persistDetailedResident(repository);
+    int originalId = resident.getId().value();
+
+    ResidentDeactivationResult result = service.deactivateResident(originalId);
+
+    CHECK(result.resident->getId().value() == originalId);
+    CHECK(repository.findById(originalId)->getId().value() == originalId);
+}
+
+// T07 Required Test 4: Resident information is preserved
+DROGON_TEST(DeactivationPreservesResidentInformationTest)
+{
+    Database db(makeTempDbPath("deactivate_preserve_info"));
+    ResidentRepository repository(db);
+    ResidentDeactivationService service(repository);
+
+    Resident resident = persistDetailedResident(repository);
+    int id = resident.getId().value();
+
+    service.deactivateResident(id);
+
+    std::optional<Resident> stored = repository.findById(id);
+    CHECK(stored.has_value());
+    CHECK(stored->getFirstName() == "Juan");
+    CHECK(stored->getLastName() == "Dela Cruz");
+    CHECK(stored->getAddress() == "Barangay Santo Tomas");
+    CHECK(stored->getContactNumber() == "09171234567");
+    CHECK(stored->getContactNumber()[0] == '0');
+    CHECK(stored->getEmail() == "juan@example.com");
+}
+
+// T07 Required Test 5: Deactivated Resident remains persisted and retrievable
+DROGON_TEST(DeactivatedResidentRemainsRetrievableTest)
+{
+    std::string dbPath = makeTempDbPath("deactivate_retrievable");
+    Database db(dbPath);
+    ResidentRepository repository(db);
+    ResidentDeactivationService service(repository);
+
+    Resident resident = persistDetailedResident(repository);
+    int id = resident.getId().value();
+
+    int countBefore = countResidentsInDatabase(dbPath);
+    service.deactivateResident(id);
+    int countAfter = countResidentsInDatabase(dbPath);
+
+    std::optional<Resident> stored = repository.findById(id);
+    CHECK(countAfter == countBefore);
+    CHECK(stored.has_value());
+    CHECK(stored->getStatus() == ResidentStatus::Inactive);
+}
+
+// T07 Required Test 6: Deactivated Resident remains available through T05
+DROGON_TEST(DeactivatedResidentRemainsInSearchAndListingTest)
+{
+    Database db(makeTempDbPath("deactivate_t05"));
+    ResidentRepository repository(db);
+    ResidentDeactivationService deactivationService(repository);
+    ResidentSearchService searchService(repository);
+
+    Resident resident = persistResident(repository, "Juan", "Cruz");
+    int id = resident.getId().value();
+
+    deactivationService.deactivateResident(id);
+
+    std::vector<Resident> searchResults = searchService.searchResidents("Juan");
+    CHECK(searchResults.size() == 1);
+    CHECK(searchResults[0].getId().value() == id);
+    CHECK(searchResults[0].getStatus() == ResidentStatus::Inactive);
+
+    std::vector<Resident> listResults = searchService.listResidents();
+    CHECK(listResults.size() == 1);
+    CHECK(listResults[0].getStatus() == ResidentStatus::Inactive);
+}
+
+// T07 Required Test 7: Already-Inactive Resident is handled safely
+DROGON_TEST(AlreadyInactiveResidentIsHandledSafelyTest)
+{
+    std::string dbPath = makeTempDbPath("deactivate_already_inactive");
+    Database db(dbPath);
+    ResidentRepository repository(db);
+    ResidentDeactivationService service(repository);
+
+    Resident resident = persistDetailedResident(repository, ResidentStatus::Inactive);
+    int id = resident.getId().value();
+
+    int countBefore = countResidentsInDatabase(dbPath);
+    ResidentDeactivationResult first = service.deactivateResident(id);
+    ResidentDeactivationResult second = service.deactivateResident(id);
+    int countAfter = countResidentsInDatabase(dbPath);
+
+    CHECK(first.success);
+    CHECK(!first.stateChanged);
+    CHECK(second.success);
+    CHECK(!second.stateChanged);
+    CHECK(countAfter == countBefore);
+
+    std::optional<Resident> stored = repository.findById(id);
+    CHECK(stored->getId().value() == id);
+    CHECK(stored->getStatus() == ResidentStatus::Inactive);
+    CHECK(stored->getFirstName() == "Juan");
+    CHECK(stored->getLastName() == "Dela Cruz");
+    CHECK(stored->getAddress() == "Barangay Santo Tomas");
+    CHECK(stored->getContactNumber() == "09171234567");
+    CHECK(stored->getEmail() == "juan@example.com");
+}
+
+// T07 Required Test 8: Nonexistent Resident is handled safely
+DROGON_TEST(DeactivatingNonexistentResidentIsHandledSafelyTest)
+{
+    Database db(makeTempDbPath("deactivate_not_found"));
+    ResidentRepository repository(db);
+    ResidentDeactivationService service(repository);
+
+    ResidentDeactivationResult result = service.deactivateResident(999999);
+
+    CHECK(!result.success);
+    CHECK(result.residentNotFound);
+    CHECK(!result.stateChanged);
+    CHECK(!result.resident.has_value());
+}
+
+// T07 Required Test 9: Nonexistent deactivation does not create or delete records
+DROGON_TEST(NonexistentDeactivationDoesNotCreateOrDeleteRecordsTest)
+{
+    std::string dbPath = makeTempDbPath("deactivate_not_found_no_change");
+    Database db(dbPath);
+    ResidentRepository repository(db);
+    ResidentDeactivationService service(repository);
+
+    Resident resident = persistDetailedResident(repository);
+    int id = resident.getId().value();
+
+    int countBefore = countResidentsInDatabase(dbPath);
+    service.deactivateResident(999999);
+    int countAfter = countResidentsInDatabase(dbPath);
+
+    CHECK(countAfter == countBefore);
+    CHECK(!repository.findById(999999).has_value());
+
+    std::optional<Resident> stored = repository.findById(id);
+    CHECK(stored.has_value());
+    CHECK(stored->getStatus() == ResidentStatus::Active);
+    CHECK(stored->getFirstName() == "Juan");
+}
+
+// T07 Required Test 10: Deactivating one Resident does not affect another
+DROGON_TEST(DeactivatingOneResidentDoesNotAffectAnotherTest)
+{
+    Database db(makeTempDbPath("deactivate_isolated"));
+    ResidentRepository repository(db);
+    ResidentDeactivationService service(repository);
+
+    Resident first = persistResident(repository, "Juan", "Cruz");
+    Resident second = persistResident(repository, "Maria", "Santos");
+    Resident third = persistResident(repository, "Pedro", "Reyes");
+
+    service.deactivateResident(second.getId().value());
+
+    std::optional<Resident> storedFirst = repository.findById(first.getId().value());
+    std::optional<Resident> storedSecond = repository.findById(second.getId().value());
+    std::optional<Resident> storedThird = repository.findById(third.getId().value());
+
+    CHECK(storedFirst->getStatus() == ResidentStatus::Active);
+    CHECK(storedSecond->getStatus() == ResidentStatus::Inactive);
+    CHECK(storedThird->getStatus() == ResidentStatus::Active);
+
+    CHECK(storedFirst->getFirstName() == "Juan");
+    CHECK(storedFirst->getLastName() == "Cruz");
+    CHECK(storedFirst->getContactNumber() == "09171234567");
+    CHECK(storedThird->getFirstName() == "Pedro");
+    CHECK(storedThird->getLastName() == "Reyes");
 }
 
 // Keeping the original starter test so existing behavior is preserved.
