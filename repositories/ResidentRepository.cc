@@ -260,3 +260,38 @@ bool ResidentRepository::update(const Resident &resident)
     // that's how we detect "Resident not found" without a separate query.
     return sqlite3_changes(database_.handle()) > 0;
 }
+
+bool ResidentRepository::deactivateById(int residentId)
+{
+    // Status is a bound parameter, but the value is fixed by the code below,
+    // not supplied by the caller — so this method can only ever deactivate.
+    const char *sql =
+        "UPDATE residents "
+        "SET status = ? "
+        "WHERE id = ?;";
+
+    sqlite3_stmt *statement = nullptr;
+    int prepareResult = sqlite3_prepare_v2(database_.handle(), sql, -1, &statement, nullptr);
+
+    if (prepareResult != SQLITE_OK)
+    {
+        throw std::runtime_error("Failed to prepare deactivate statement: " +
+                                  std::string(sqlite3_errmsg(database_.handle())));
+    }
+
+    sqlite3_bind_text(statement, 1, residentStatusToString(ResidentStatus::Inactive).c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(statement, 2, residentId);
+
+    int stepResult = sqlite3_step(statement);
+
+    if (stepResult != SQLITE_DONE)
+    {
+        std::string errorMessage = sqlite3_errmsg(database_.handle());
+        sqlite3_finalize(statement);
+        throw std::runtime_error("Failed to deactivate Resident: " + errorMessage);
+    }
+
+    sqlite3_finalize(statement);
+
+    return sqlite3_changes(database_.handle()) > 0;
+}

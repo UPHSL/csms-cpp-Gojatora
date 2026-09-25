@@ -33,6 +33,11 @@ public:
     // Does NOT modify id or status — only the 5 editable fields.
     bool update(const Resident &resident);
 
+    // Soft-deactivates a Resident: sets ONLY status = 'Inactive' for this id.
+    // The row is never deleted. Returns true if a row with this id exists
+    // (whether it was Active or already Inactive), false if no such id.
+    bool deactivateById(int residentId);
+
 private:
     Database &database_;
 
