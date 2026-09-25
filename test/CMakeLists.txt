@@ -5,6 +5,7 @@ add_executable(${PROJECT_NAME}
     test_main.cc
     ../models/Resident.cc
     ../models/ResidentValidator.cc
+    ../models/ServiceRequest.cc
     ../database/Database.cc
     ../repositories/ResidentRepository.cc
     ../services/ResidentRegistrationService.cc

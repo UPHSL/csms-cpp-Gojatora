@@ -4,6 +4,7 @@
 
 #include "../models/Resident.h"
 #include "../models/ResidentValidator.h"
+#include "../models/ServiceRequest.h"
 
 #include "../database/Database.h"
 
@@ -1247,6 +1248,72 @@ DROGON_TEST(DeactivatingOneResidentDoesNotAffectAnotherTest)
     CHECK(storedFirst->getContactNumber() == "09171234567");
     CHECK(storedThird->getFirstName() == "Pedro");
     CHECK(storedThird->getLastName() == "Reyes");
+}
+
+// T08 Required Test 1: Service Request can be created
+DROGON_TEST(ServiceRequestCanBeCreatedTest)
+{
+    ServiceRequest request(25,
+                           "Barangay Clearance",
+                           "Request for employment requirement",
+                           "2026-09-25");
+
+    CHECK(request.getResidentId() == 25);
+}
+
+// T08 Required Test 2: Service Request information is accessible
+DROGON_TEST(ServiceRequestInformationIsAccessibleTest)
+{
+    ServiceRequest request(25,
+                           "Barangay Clearance",
+                           "Request for employment requirement",
+                           "2026-09-25");
+
+    CHECK(request.getResidentId() == 25);
+    CHECK(request.getServiceType() == "Barangay Clearance");
+    CHECK(request.getDescription() == "Request for employment requirement");
+    CHECK(request.getDateRequested() == "2026-09-25");
+}
+
+// T08 Required Test 3: Resident ID is preserved
+DROGON_TEST(ServiceRequestPreservesResidentIdTest)
+{
+    ServiceRequest request(25, "Permit Request", "Business permit", "2026-09-25");
+
+    CHECK(request.getResidentId() == 25);
+}
+
+// T08 Required Test 4: New Service Request has an unassigned ID
+DROGON_TEST(NewServiceRequestHasNoIdTest)
+{
+    ServiceRequest request(25, "Permit Request", "Business permit", "2026-09-25");
+
+    CHECK(!request.getId().has_value());
+}
+
+// T08 Required Test 5: New Service Request defaults to Pending
+DROGON_TEST(NewServiceRequestDefaultsToPendingTest)
+{
+    ServiceRequest request(25, "Permit Request", "Business permit", "2026-09-25");
+
+    CHECK(request.getStatus() == ServiceRequestStatus::Pending);
+}
+
+// T08 Required Test 6: Service Request information is independent between objects
+DROGON_TEST(ServiceRequestsAreIndependentTest)
+{
+    ServiceRequest first(25, "Barangay Clearance", "Employment requirement", "2026-09-25");
+    ServiceRequest second(31, "Community Assistance", "Medical assistance", "2026-10-01");
+
+    CHECK(first.getResidentId() == 25);
+    CHECK(first.getServiceType() == "Barangay Clearance");
+    CHECK(first.getDescription() == "Employment requirement");
+    CHECK(first.getDateRequested() == "2026-09-25");
+
+    CHECK(second.getResidentId() == 31);
+    CHECK(second.getServiceType() == "Community Assistance");
+    CHECK(second.getDescription() == "Medical assistance");
+    CHECK(second.getDateRequested() == "2026-10-01");
 }
 
 // Keeping the original starter test so existing behavior is preserved.
