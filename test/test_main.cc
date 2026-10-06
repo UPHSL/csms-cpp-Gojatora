@@ -2,6 +2,2215 @@
 #include <drogon/drogon_test.h>
 #include <drogon/drogon.h>
 
+#include "../models/Resident.h"
+#include "../models/ResidentValidator.h"
+#include "../models/ServiceRequest.h"
+#include "../models/ServiceRequestValidator.h"
+
+#include "../database/Database.h"
+
+#include "../repositories/ResidentRepository.h"
+#include "../repositories/ServiceRequestRepository.h"
+
+#include "../services/ResidentRegistrationService.h"
+#include "../services/ResidentSearchService.h"
+#include "../services/ResidentUpdateService.h"
+#include "../services/ResidentDeactivationService.h"
+#include "../services/ServiceRequestSubmissionService.h"
+#include "../services/ServiceRequestStatusService.h"
+
+#include <sqlite3.h>
+#include <filesystem>
+#include <cstdio>
+
+// Creates a fresh, uniquely-named temporary SQLite file path for a test.
+// Using a unique name per test (via a counter) avoids tests interfering
+// with each other, and avoids leftover data from a previous test run.
+std::string makeTempDbPath(const std::string &testName)
+{
+    static int counter = 0;
+    counter++;
+
+    std::filesystem::path tempDir = std::filesystem::temp_directory_path();
+    std::filesystem::path dbPath = tempDir / ("csms_test_" + testName + "_" + std::to_string(counter) + ".sqlite3");
+
+    // Remove any leftover file from a previous run, if it exists,
+    // so each test starts from a clean, empty database.
+    if (std::filesystem::exists(dbPath))
+    {
+        std::filesystem::remove(dbPath);
+    }
+
+    return dbPath.string();
+}
+
+// T01 Required Test 1: Resident Creation
+// Verifies that a Resident can be created using valid Resident information.
+DROGON_TEST(ResidentCreationTest)
+{
+    Resident resident(1,
+                       "Adrian Paolo",
+                       "Follante",
+                       "Kinnari Phase 1, Lantic, Carmona, Cavite",
+                       "09763214551",
+                       "adrian.paolo@example.com",
+                       ResidentStatus::Active);
+
+    CHECK(resident.getId() == 1);
+    CHECK(resident.getFirstName() == "Adrian Paolo");
+    CHECK(resident.getLastName() == "Follante");
+}
+
+// T01 Required Test 2: Resident Information Access
+// Verifies that Resident information can be assigned and retrieved correctly.
+DROGON_TEST(ResidentInformationAccessTest)
+{
+    Resident resident;
+
+    resident.setId(2);
+    resident.setFirstName("Wilmar");
+    resident.setLastName("Lipata");
+    resident.setAddress("Kinnari Phase 2, Lantic, Carmona, Cavite");
+    resident.setContactNumber("09179876543");
+    resident.setEmail("wilmar.lipata@example.com");
+    resident.setStatus(ResidentStatus::Active);
+
+    CHECK(resident.getId() == 2);
+    CHECK(resident.getFirstName() == "Wilmar");
+    CHECK(resident.getLastName() == "Lipata");
+    CHECK(resident.getAddress() == "Kinnari Phase 2, Lantic, Carmona, Cavite");
+    CHECK(resident.getContactNumber() == "09179876543");
+    CHECK(resident.getEmail() == "wilmar.lipata@example.com");
+}
+
+// T01 Required Test 3: Resident Status
+// Verifies that the Resident model can represent the "Active" status.
+DROGON_TEST(ResidentStatusTest)
+{
+    Resident resident;
+    resident.setStatus(ResidentStatus::Active);
+
+    CHECK(resident.getStatus() == ResidentStatus::Active);
+    CHECK(residentStatusToString(resident.getStatus()) == "Active");
+}
+
+// T02 Required Test 1: Valid Resident information passes validation
+DROGON_TEST(ValidResidentInformationPassesValidationTest)
+{
+    Resident resident(1,
+                       "Adrian Paolo",
+                       "Follante",
+                       "Barangay Lantic, Carmona, Cavite",
+                       "09763214551",
+                       "adrian.paolo@example.com",
+                       ResidentStatus::Active);
+
+    ResidentValidator validator;
+    CHECK(validator.isValid(resident));
+}
+
+// T02 Required Test 2: Missing first name fails validation
+DROGON_TEST(MissingFirstNameFailsValidationTest)
+{
+    Resident resident(1,
+                       "",
+                       "Follante",
+                       "Barangay Lantic, Carmona, Cavite",
+                       "09763214551",
+                       "adrian.paolo@example.com",
+                       ResidentStatus::Active);
+
+    ResidentValidator validator;
+    auto errors = validator.validate(resident);
+
+    CHECK(!validator.isValid(resident));
+    CHECK(std::find(errors.begin(), errors.end(), "firstName") != errors.end());
+}
+
+// T02 Required Test 3: Missing last name fails validation
+DROGON_TEST(MissingLastNameFailsValidationTest)
+{
+    Resident resident(1,
+                       "Adrian Paolo",
+                       "",
+                       "Barangay Lantic, Carmona, Cavite",
+                       "09763214551",
+                       "adrian.paolo@example.com",
+                       ResidentStatus::Active);
+
+    ResidentValidator validator;
+    auto errors = validator.validate(resident);
+
+    CHECK(!validator.isValid(resident));
+    CHECK(std::find(errors.begin(), errors.end(), "lastName") != errors.end());
+}
+
+// T02 Required Test 4: Missing address fails validation
+DROGON_TEST(MissingAddressFailsValidationTest)
+{
+    Resident resident(1,
+                       "Adrian Paolo",
+                       "Follante",
+                       "",
+                       "09763214551",
+                       "adrian.paolo@example.com",
+                       ResidentStatus::Active);
+
+    ResidentValidator validator;
+    auto errors = validator.validate(resident);
+
+    CHECK(!validator.isValid(resident));
+    CHECK(std::find(errors.begin(), errors.end(), "address") != errors.end());
+}
+
+// T02 Required Test 5: Whitespace-only required information fails validation
+DROGON_TEST(WhitespaceOnlyRequiredInformationFailsValidationTest)
+{
+    Resident resident(1,
+                       "   ",
+                       "Follante",
+                       "Barangay Lantic, Carmona, Cavite",
+                       "09763214551",
+                       "adrian.paolo@example.com",
+                       ResidentStatus::Active);
+
+    ResidentValidator validator;
+    auto errors = validator.validate(resident);
+
+    CHECK(!validator.isValid(resident));
+    CHECK(std::find(errors.begin(), errors.end(), "firstName") != errors.end());
+}
+
+// T02 Required Test 6: Invalid contact number fails validation
+DROGON_TEST(InvalidContactNumberFailsValidationTest)
+{
+    Resident resident(1,
+                       "Adrian Paolo",
+                       "Follante",
+                       "Barangay Lantic, Carmona, Cavite",
+                       "0976ACE4551",
+                       "adrian.paolo@example.com",
+                       ResidentStatus::Active);
+
+    ResidentValidator validator;
+    auto errors = validator.validate(resident);
+
+    CHECK(!validator.isValid(resident));
+    CHECK(std::find(errors.begin(), errors.end(), "contactNumber") != errors.end());
+}
+
+// T02 Required Test 7: Invalid email fails validation
+DROGON_TEST(InvalidEmailFailsValidationTest)
+{
+    Resident resident(1,
+                       "Adrian Paolo",
+                       "Follante",
+                       "Barangay Lantic, Carmona, Cavite",
+                       "09763214551",
+                       "adrian.paolo.example.com",
+                       ResidentStatus::Active);
+
+    ResidentValidator validator;
+    auto errors = validator.validate(resident);
+
+    CHECK(!validator.isValid(resident));
+    CHECK(std::find(errors.begin(), errors.end(), "email") != errors.end());
+}
+
+// T02 Required Test 8: Supported statuses (Active and Inactive) pass validation
+DROGON_TEST(SupportedResidentStatusesPassValidationTest)
+{
+    Resident activeResident(1,
+                             "Adrian Paolo",
+                             "Follante",
+                             "Barangay Lantic, Carmona, Cavite",
+                             "09763214551",
+                             "adrian.paolo@example.com",
+                             ResidentStatus::Active);
+
+    Resident inactiveResident(2,
+                               "Wilmar",
+                               "Lipata",
+                               "Barangay 1, Carmona, Cavite",
+                               "09181234567",
+                               "wilmar.lipata@example.com",
+                               ResidentStatus::Inactive);
+
+    ResidentValidator validator;
+
+    CHECK(validator.isValid(activeResident));
+    CHECK(validator.isValid(inactiveResident));
+}
+
+// T02 Required Test 9: Unsupported status fails validation
+// Since ResidentStatus is an enum class, we simulate an invalid/unexpected
+// value using static_cast — similar to how corrupted or unexpected data
+// (e.g. from a database) might arrive in a real system.
+DROGON_TEST(UnsupportedResidentStatusFailsValidationTest)
+{
+    ResidentStatus invalidStatus = static_cast<ResidentStatus>(99);
+
+    Resident resident(1,
+                       "Adrian Paolo",
+                       "Follante",
+                       "Barangay Lantic, Carmona, Cavite",
+                       "09763214551",
+                       "adrian.paolo@example.com",
+                       invalidStatus);
+
+    ResidentValidator validator;
+    auto errors = validator.validate(resident);
+
+    CHECK(!validator.isValid(resident));
+    CHECK(std::find(errors.begin(), errors.end(), "status") != errors.end());
+}
+
+// Regression test (not part of T03's required scenarios): confirms the
+// Resident model still creates residents with no id (std::nullopt) before
+// persistence, after the id_ type was changed from int to std::optional<int>.
+DROGON_TEST(NewResidentHasNoIdBeforePersistenceTest)
+{
+    Resident resident("Adrian Paolo",
+                       "Follante",
+                       "Barangay Lantic, Carmona, Cavite",
+                       "09763214551",
+                       "adrian.paolo@example.com",
+                       ResidentStatus::Active);
+
+    CHECK(!resident.getId().has_value());
+}
+
+// T03 Required Test 1: Persist a Resident
+DROGON_TEST(PersistAResidentTest)
+{
+    Database db(makeTempDbPath("persist"));
+    ResidentRepository repository(db);
+
+    Resident newResident("Adrian Paolo",
+                          "Follante",
+                          "Barangay Lantic, Carmona, Cavite",
+                          "09763214551",
+                          "adrian.paolo@example.com",
+                          ResidentStatus::Active);
+
+    Resident saved = repository.save(newResident);
+
+    // If save() completed without throwing, and returned a Resident, we succeeded.
+    CHECK(saved.getFirstName() == "Adrian Paolo");
+}
+
+// T03 Required Test 2: Resident receives an identifier
+DROGON_TEST(ResidentReceivesAnIdentifierTest)
+{
+    Database db(makeTempDbPath("receives_id"));
+    ResidentRepository repository(db);
+
+    Resident newResident("Wilmar",
+                          "Lipata",
+                          "Barangay 1 Carmona, Cavite",
+                          "09181234567",
+                          "wilmar.lipata@example.com",
+                          ResidentStatus::Active);
+
+    // Before persistence, the T01 behavior applies: no id yet.
+    CHECK(!newResident.getId().has_value());
+
+    Resident saved = repository.save(newResident);
+
+    // After persistence, SQLite must have assigned a real, usable id.
+    CHECK(saved.getId().has_value());
+}
+
+// T03 Required Test 3: Retrieve Resident by identifier
+DROGON_TEST(RetrieveResidentByIdentifierTest)
+{
+    Database db(makeTempDbPath("retrieve_by_id"));
+    ResidentRepository repository(db);
+
+    Resident newResident("Aaron",
+                          "Cuartero",
+                          "Barangay 5 Binan, Laguna",
+                          "09191234567",
+                          "aaron@example.com",
+                          ResidentStatus::Active);
+
+    Resident saved = repository.save(newResident);
+    int savedId = saved.getId().value();
+
+    std::optional<Resident> found = repository.findById(savedId);
+
+    CHECK(found.has_value());
+    CHECK(found->getId().value() == savedId);
+    CHECK(found->getFirstName() == "Aaron");
+}
+
+// T03 Required Test 4: Resident information is preserved
+DROGON_TEST(ResidentInformationIsPreservedTest)
+{
+    Database db(makeTempDbPath("info_preserved"));
+    ResidentRepository repository(db);
+
+    Resident newResident("Dominie",
+                          "Cruz",
+                          "Barangay Bancal, Carmona, Cavite",
+                          "09201234567",
+                          "dominie@example.com",
+                          ResidentStatus::Active);
+
+    Resident saved = repository.save(newResident);
+    std::optional<Resident> found = repository.findById(saved.getId().value());
+
+    CHECK(found.has_value());
+    CHECK(found->getFirstName() == "Dominie");
+    CHECK(found->getLastName() == "Cruz");
+    CHECK(found->getAddress() == "Barangay Bancal, Carmona, Cavite");
+    CHECK(found->getContactNumber() == "09201234567"); // leading zero preserved
+    CHECK(found->getEmail() == "dominie@example.com");
+}
+
+// T03 Required Test 5: Active status is preserved
+DROGON_TEST(ActiveStatusIsPreservedTest)
+{
+    Database db(makeTempDbPath("status_preserved"));
+    ResidentRepository repository(db);
+
+    Resident newResident("Carlo",
+                          "Villanueva",
+                          "Barangay San Isidro, Carmona, Cavite",
+                          "09211234567",
+                          "carlo@example.com",
+                          ResidentStatus::Active);
+
+    Resident saved = repository.save(newResident);
+    std::optional<Resident> found = repository.findById(saved.getId().value());
+
+    CHECK(found.has_value());
+    CHECK(found->getStatus() == ResidentStatus::Active);
+}
+
+// T03 Required Test 6: Missing Resident is handled safely
+DROGON_TEST(MissingResidentIsHandledTest)
+{
+    Database db(makeTempDbPath("missing_resident"));
+    ResidentRepository repository(db);
+
+    std::optional<Resident> found = repository.findById(999999);
+
+    CHECK(!found.has_value());
+}
+
+// T03 Required Test 7: Persistence is not limited to one repository object
+DROGON_TEST(PersistenceSurvivesNewRepositoryInstanceTest)
+{
+    std::string dbPath = makeTempDbPath("shared_file");
+
+    int savedId;
+    {
+        // First Database/repository instance: save a Resident, then let
+        // this scope end (simulating "finished using the first repository").
+        Database firstDb(dbPath);
+        ResidentRepository firstRepository(firstDb);
+
+        Resident newResident("Liza",
+                              "Fernandez",
+                              "Barangay Balibago, Carmona, Cavite",
+                              "09221234567",
+                              "liza@example.com",
+                              ResidentStatus::Active);
+
+        Resident saved = firstRepository.save(newResident);
+        savedId = saved.getId().value();
+    }
+
+    // Second, completely separate Database/repository instance,
+    // connected to the SAME file on disk.
+    Database secondDb(dbPath);
+    ResidentRepository secondRepository(secondDb);
+
+    std::optional<Resident> found = secondRepository.findById(savedId);
+
+    // If this passes, the data truly lives in the SQLite file,
+    // not just inside one in-memory C++ object.
+    CHECK(found.has_value());
+    CHECK(found->getFirstName() == "Liza");
+}
+
+// Student-designed test: Contact number's leading zero survives a full
+// save + retrieve round trip through SQLite.
+//
+// Why this scenario: contact_number is stored as TEXT specifically to
+// preserve the leading "0" in numbers like "09171234567". If a future
+// change accidentally stored it as an INTEGER column, or someone
+// mistakenly used sqlite3_bind_int instead of sqlite3_bind_text, SQLite
+// would silently strip the leading zero (storing it as 9171234567).
+// This test exists specifically to catch that class of regression,
+// which would otherwise be easy to miss since the value would still
+// "look like a number" and other fields would be unaffected.
+DROGON_TEST(ContactNumberLeadingZeroSurvivesRoundTripTest)
+{
+    Database db(makeTempDbPath("leading_zero"));
+    ResidentRepository repository(db);
+
+    Resident newResident("Klaire",
+                          "Torres",
+                          "Barangay Langkaan I, Dasmarinas, Cavite",
+                          "09001234567",
+                          "klaire@example.com",
+                          ResidentStatus::Active);
+
+    Resident saved = repository.save(newResident);
+    std::optional<Resident> found = repository.findById(saved.getId().value());
+
+    CHECK(found.has_value());
+    CHECK(found->getContactNumber() == "09001234567");
+    CHECK(found->getContactNumber().length() == 11);
+    CHECK(found->getContactNumber()[0] == '0');
+}
+
+// valid-Resident helper
+Resident makeValidResidentForRegistration()
+{
+    return Resident("Juan",
+                     "Dela Cruz",
+                     "Barangay Santo Tomas",
+                     "09171234567",
+                     "juan@example.com",
+                     ResidentStatus::Active);
+}
+
+// Directly queries SQLite to count Resident rows, bypassing our own
+// repository — used to prove invalid Residents never reach the database,
+// rather than just trusting the registration result's return value.
+int countResidentsInDatabase(const std::string &databasePath)
+{
+    sqlite3 *database = nullptr;
+    sqlite3_open(databasePath.c_str(), &database);
+
+    const char *sql = "SELECT COUNT(*) FROM residents";
+    sqlite3_stmt *statement = nullptr;
+    sqlite3_prepare_v2(database, sql, -1, &statement, nullptr);
+    sqlite3_step(statement);
+
+    int count = sqlite3_column_int(statement, 0);
+
+    sqlite3_finalize(statement);
+    sqlite3_close(database);
+
+    return count;
+}
+
+// T04 Required Test 1: Register a valid Resident
+DROGON_TEST(RegisterValidResidentTest)
+{
+    Database db(makeTempDbPath("register_valid"));
+    ResidentRepository repository(db);
+    ResidentValidator validator;
+    ResidentRegistrationService service(validator, repository);
+
+    Resident resident = makeValidResidentForRegistration();
+
+    ResidentRegistrationResult result = service.registerResident(resident);
+
+    CHECK(result.success);
+    CHECK(result.resident.has_value());
+    CHECK(result.errors.empty());
+}
+
+// T04 Required Test 2: Registered Resident receives an identifier
+DROGON_TEST(RegisteredResidentReceivesIdentifierTest)
+{
+    Database db(makeTempDbPath("register_id"));
+    ResidentRepository repository(db);
+    ResidentValidator validator;
+    ResidentRegistrationService service(validator, repository);
+
+    Resident resident = makeValidResidentForRegistration();
+    CHECK(!resident.getId().has_value());
+
+    ResidentRegistrationResult result = service.registerResident(resident);
+
+    CHECK(result.success);
+    CHECK(result.resident->getId().has_value());
+}
+
+// T04 Required Test 3: Registered Resident is actually persisted
+DROGON_TEST(RegisteredResidentIsPersistedTest)
+{
+    Database db(makeTempDbPath("register_persisted"));
+    ResidentRepository repository(db);
+    ResidentValidator validator;
+    ResidentRegistrationService service(validator, repository);
+
+    Resident resident = makeValidResidentForRegistration();
+    ResidentRegistrationResult result = service.registerResident(resident);
+
+    CHECK(result.success);
+    int residentId = result.resident->getId().value();
+
+    std::optional<Resident> stored = repository.findById(residentId);
+    CHECK(stored.has_value());
+}
+
+// T04 Required Test 4: Registered Resident information is preserved
+DROGON_TEST(RegisteredResidentInformationIsPreservedTest)
+{
+    Database db(makeTempDbPath("register_info"));
+    ResidentRepository repository(db);
+    ResidentValidator validator;
+    ResidentRegistrationService service(validator, repository);
+
+    Resident resident = makeValidResidentForRegistration();
+    ResidentRegistrationResult result = service.registerResident(resident);
+
+    CHECK(result.success);
+    int residentId = result.resident->getId().value();
+
+    std::optional<Resident> stored = repository.findById(residentId);
+    CHECK(stored.has_value());
+    CHECK(stored->getFirstName() == "Juan");
+    CHECK(stored->getLastName() == "Dela Cruz");
+    CHECK(stored->getAddress() == "Barangay Santo Tomas");
+    CHECK(stored->getContactNumber() == "09171234567");
+    CHECK(stored->getEmail() == "juan@example.com");
+    CHECK(stored->getStatus() == ResidentStatus::Active);
+}
+
+// T04 Required Test 5: Default Active status is preserved through registration
+DROGON_TEST(RegisteredResidentPreservesDefaultActiveStatusTest)
+{
+    Database db(makeTempDbPath("register_status"));
+    ResidentRepository repository(db);
+    ResidentValidator validator;
+    ResidentRegistrationService service(validator, repository);
+
+    Resident resident = makeValidResidentForRegistration();
+    CHECK(resident.getStatus() == ResidentStatus::Active);
+
+    ResidentRegistrationResult result = service.registerResident(resident);
+
+    CHECK(result.success);
+    CHECK(result.resident->getStatus() == ResidentStatus::Active);
+}
+
+// T04 Required Test 6: Invalid Resident registration fails
+DROGON_TEST(InvalidResidentRegistrationFailsTest)
+{
+    Database db(makeTempDbPath("register_invalid"));
+    ResidentRepository repository(db);
+    ResidentValidator validator;
+    ResidentRegistrationService service(validator, repository);
+
+    Resident invalidResident("",
+                              "Dela Cruz",
+                              "Barangay Santo Tomas",
+                              "09171234567",
+                              "juan@example.com",
+                              ResidentStatus::Active);
+
+    ResidentRegistrationResult result = service.registerResident(invalidResident);
+
+    CHECK(!result.success);
+    CHECK(!result.resident.has_value());
+    CHECK(!result.errors.empty());
+}
+
+// T04 Required Test 7: Invalid Resident is not persisted
+DROGON_TEST(InvalidResidentIsNotPersistedTest)
+{
+    std::string dbPath = makeTempDbPath("register_not_persisted");
+    Database db(dbPath);
+    ResidentRepository repository(db);
+    ResidentValidator validator;
+    ResidentRegistrationService service(validator, repository);
+
+    Resident invalidResident("",
+                              "Dela Cruz",
+                              "Barangay Santo Tomas",
+                              "09171234567",
+                              "juan@example.com",
+                              ResidentStatus::Active);
+
+    int countBefore = countResidentsInDatabase(dbPath);
+    ResidentRegistrationResult result = service.registerResident(invalidResident);
+    int countAfter = countResidentsInDatabase(dbPath);
+
+    CHECK(!result.success);
+    CHECK(countAfter == countBefore);
+}
+
+// T04 Required Test 8: Validation failure can be identified
+DROGON_TEST(RegistrationReturnsValidationErrorsTest)
+{
+    Database db(makeTempDbPath("register_errors"));
+    ResidentRepository repository(db);
+    ResidentValidator validator;
+    ResidentRegistrationService service(validator, repository);
+
+    Resident invalidResident("",
+                              "Dela Cruz",
+                              "Barangay Santo Tomas",
+                              "09171234567",
+                              "juan@example.com",
+                              ResidentStatus::Active);
+
+    ResidentRegistrationResult result = service.registerResident(invalidResident);
+
+    CHECK(!result.success);
+    CHECK(std::find(result.errors.begin(), result.errors.end(), "firstName") != result.errors.end());
+}
+
+// Persists a Resident directly through the repository, for setting up
+// search/listing test scenarios (bypasses registration/validation on
+// purpose, since T05 is testing query behavior, not registration).
+Resident persistResident(ResidentRepository &repository,
+                          const std::string &firstName,
+                          const std::string &lastName,
+                          ResidentStatus status = ResidentStatus::Active)
+{
+    Resident resident(firstName, lastName, "Some Address", "09171234567", "test@example.com", status);
+    return repository.save(resident);
+}
+
+// T05 Required Test 1: List all persisted Residents
+DROGON_TEST(ListAllPersistedResidentsTest)
+{
+    Database db(makeTempDbPath("list_all"));
+    ResidentRepository repository(db);
+    ResidentSearchService service(repository);
+
+    persistResident(repository, "Juan", "Dela Cruz");
+    persistResident(repository, "Maria", "Santos");
+
+    std::vector<Resident> results = service.listResidents();
+
+    CHECK(results.size() == 2);
+}
+
+// T05 Required Test 2: Empty Resident listing
+DROGON_TEST(EmptyResidentListingTest)
+{
+    Database db(makeTempDbPath("list_empty"));
+    ResidentRepository repository(db);
+    ResidentSearchService service(repository);
+
+    std::vector<Resident> results = service.listResidents();
+
+    CHECK(results.empty());
+}
+
+// T05 Required Test 3: Listing uses required ordering (lastName, firstName, id)
+DROGON_TEST(ListingUsesRequiredOrderingTest)
+{
+    Database db(makeTempDbPath("list_order"));
+    ResidentRepository repository(db);
+    ResidentSearchService service(repository);
+
+    // Insert deliberately out of the expected display order.
+    persistResident(repository, "Ana", "Santos");
+    persistResident(repository, "Pedro", "Cruz");
+    persistResident(repository, "Maria", "Andres");
+    persistResident(repository, "Juan", "Cruz");
+
+    std::vector<Resident> results = service.listResidents();
+
+    CHECK(results.size() == 4);
+    // Expected order: Andres, Cruz(Juan), Cruz(Pedro), Santos
+    CHECK(results[0].getLastName() == "Andres");
+    CHECK(results[1].getLastName() == "Cruz");
+    CHECK(results[1].getFirstName() == "Juan");
+    CHECK(results[2].getLastName() == "Cruz");
+    CHECK(results[2].getFirstName() == "Pedro");
+    CHECK(results[3].getLastName() == "Santos");
+}
+
+// T05 Required Test 4: Partial first name search is case-insensitive
+DROGON_TEST(PartialFirstNameSearchIsCaseInsensitiveTest)
+{
+    Database db(makeTempDbPath("search_first_name"));
+    ResidentRepository repository(db);
+    ResidentSearchService service(repository);
+
+    persistResident(repository, "Juan", "Dela Cruz");
+
+    std::vector<Resident> results = service.searchResidents("jUa");
+
+    CHECK(results.size() == 1);
+    CHECK(results[0].getFirstName() == "Juan");
+}
+
+// T05 Required Test 5: Partial last name search is case-insensitive
+DROGON_TEST(PartialLastNameSearchIsCaseInsensitiveTest)
+{
+    Database db(makeTempDbPath("search_last_name"));
+    ResidentRepository repository(db);
+    ResidentSearchService service(repository);
+
+    persistResident(repository, "Juan", "Dela Cruz");
+
+    std::vector<Resident> results = service.searchResidents("cRuZ");
+
+    CHECK(results.size() == 1);
+    CHECK(results[0].getLastName() == "Dela Cruz");
+}
+
+// T05 Required Test 6: Blank search returns all Residents
+DROGON_TEST(BlankSearchReturnsAllResidentsTest)
+{
+    Database db(makeTempDbPath("search_blank"));
+    ResidentRepository repository(db);
+    ResidentSearchService service(repository);
+
+    persistResident(repository, "Juan", "Dela Cruz");
+    persistResident(repository, "Maria", "Santos");
+
+    std::vector<Resident> blankResults = service.searchResidents("   ");
+    std::vector<Resident> listResults = service.listResidents();
+
+    CHECK(blankResults.size() == listResults.size());
+    CHECK(blankResults.size() == 2);
+}
+
+// T05 Required Test 7: Search with no match returns empty collection
+DROGON_TEST(SearchWithNoMatchReturnsEmptyCollectionTest)
+{
+    Database db(makeTempDbPath("search_no_match"));
+    ResidentRepository repository(db);
+    ResidentSearchService service(repository);
+
+    persistResident(repository, "Juan", "Dela Cruz");
+
+    std::vector<Resident> results = service.searchResidents("ZzzUnknownResident");
+
+    CHECK(results.empty());
+}
+
+// T05 Required Test 8: Search results preserve Resident information
+DROGON_TEST(SearchResultsPreserveResidentInformationTest)
+{
+    Database db(makeTempDbPath("search_preserve_info"));
+    ResidentRepository repository(db);
+    ResidentSearchService service(repository);
+
+    Resident resident("Juan", "Dela Cruz", "Barangay Santo Tomas", "09171234567", "juan@example.com", ResidentStatus::Active);
+    repository.save(resident);
+
+    std::vector<Resident> results = service.searchResidents("Juan");
+
+    CHECK(results.size() == 1);
+    CHECK(results[0].getFirstName() == "Juan");
+    CHECK(results[0].getLastName() == "Dela Cruz");
+    CHECK(results[0].getAddress() == "Barangay Santo Tomas");
+    CHECK(results[0].getContactNumber() == "09171234567");
+    CHECK(results[0].getEmail() == "juan@example.com");
+    CHECK(results[0].getStatus() == ResidentStatus::Active);
+}
+
+// T05 Required Test 9: Active and Inactive Residents are both included
+DROGON_TEST(ActiveAndInactiveResidentsAreIncludedTest)
+{
+    Database db(makeTempDbPath("list_status_mix"));
+    ResidentRepository repository(db);
+    ResidentSearchService service(repository);
+
+    persistResident(repository, "Juan", "Dela Cruz", ResidentStatus::Active);
+    persistResident(repository, "Maria", "Santos", ResidentStatus::Inactive);
+
+    std::vector<Resident> results = service.listResidents();
+
+    CHECK(results.size() == 2);
+}
+
+// T05 Required Test 10: Matching Resident is not duplicated
+DROGON_TEST(MatchingResidentIsNotDuplicatedTest)
+{
+    Database db(makeTempDbPath("search_no_duplicate"));
+    ResidentRepository repository(db);
+    ResidentSearchService service(repository);
+
+    // "Cruz" appears in both the first name and last name.
+    persistResident(repository, "Cruzita", "Cruz");
+
+    std::vector<Resident> results = service.searchResidents("Cruz");
+
+    CHECK(results.size() == 1);
+}
+
+// T06 Required Test 1: Valid Resident update succeeds
+DROGON_TEST(ValidResidentUpdateSucceedsTest)
+{
+    Database db(makeTempDbPath("update_valid"));
+    ResidentRepository repository(db);
+    ResidentValidator validator;
+    ResidentUpdateService service(validator, repository);
+
+    Resident resident = persistResident(repository, "Juan", "Cruz");
+    int id = resident.getId().value();
+
+    ResidentUpdateResult result = service.updateResident(
+        id, "Juan Miguel", "Dela Cruz", "New Address", "09181234567", "juanmiguel@example.com");
+
+    CHECK(result.success);
+    CHECK(!result.residentNotFound);
+    CHECK(result.errors.empty());
+}
+
+// T06 Required Test 2: Resident ID is preserved
+DROGON_TEST(UpdatePreservesResidentIdTest)
+{
+    Database db(makeTempDbPath("update_preserve_id"));
+    ResidentRepository repository(db);
+    ResidentValidator validator;
+    ResidentUpdateService service(validator, repository);
+
+    Resident resident = persistResident(repository, "Juan", "Cruz");
+    int originalId = resident.getId().value();
+
+    ResidentUpdateResult result = service.updateResident(
+        originalId, "Juan Miguel", "Dela Cruz", "New Address", "09181234567", "juanmiguel@example.com");
+
+    CHECK(result.success);
+    CHECK(result.resident->getId().value() == originalId);
+}
+
+// T06 Required Test 3: Permitted Resident information is persisted
+DROGON_TEST(PermittedResidentInformationIsPersistedTest)
+{
+    Database db(makeTempDbPath("update_info_persisted"));
+    ResidentRepository repository(db);
+    ResidentValidator validator;
+    ResidentUpdateService service(validator, repository);
+
+    Resident resident = persistResident(repository, "Juan", "Cruz");
+    int id = resident.getId().value();
+
+    service.updateResident(id, "Juan Miguel", "Dela Cruz", "New Address", "09181234567", "juanmiguel@example.com");
+
+    std::optional<Resident> stored = repository.findById(id);
+    CHECK(stored.has_value());
+    CHECK(stored->getFirstName() == "Juan Miguel");
+    CHECK(stored->getLastName() == "Dela Cruz");
+    CHECK(stored->getAddress() == "New Address");
+    CHECK(stored->getContactNumber() == "09181234567");
+    CHECK(stored->getEmail() == "juanmiguel@example.com");
+}
+
+// T06 Required Test 4: Resident status is preserved
+DROGON_TEST(UpdatePreservesResidentStatusTest)
+{
+    Database db(makeTempDbPath("update_preserve_status"));
+    ResidentRepository repository(db);
+    ResidentValidator validator;
+    ResidentUpdateService service(validator, repository);
+
+    Resident resident = persistResident(repository, "Juan", "Cruz", ResidentStatus::Inactive);
+    int id = resident.getId().value();
+
+    ResidentUpdateResult result = service.updateResident(
+        id, "Juan Miguel", "Dela Cruz", "New Address", "09181234567", "juanmiguel@example.com");
+
+    CHECK(result.success);
+    CHECK(result.resident->getStatus() == ResidentStatus::Inactive);
+}
+
+// T06 Required Test 5: Invalid update fails
+DROGON_TEST(InvalidUpdateFailsTest)
+{
+    Database db(makeTempDbPath("update_invalid"));
+    ResidentRepository repository(db);
+    ResidentValidator validator;
+    ResidentUpdateService service(validator, repository);
+
+    Resident resident = persistResident(repository, "Juan", "Cruz");
+    int id = resident.getId().value();
+
+    ResidentUpdateResult result = service.updateResident(
+        id, "", "Dela Cruz", "New Address", "09181234567", "juanmiguel@example.com");
+
+    CHECK(!result.success);
+    CHECK(!result.residentNotFound);
+    CHECK(!result.errors.empty());
+}
+
+// T06 Required Test 6: Invalid update does not modify persisted information
+DROGON_TEST(InvalidUpdateDoesNotModifyPersistedInformationTest)
+{
+    Database db(makeTempDbPath("update_invalid_no_change"));
+    ResidentRepository repository(db);
+    ResidentValidator validator;
+    ResidentUpdateService service(validator, repository);
+
+    Resident resident = persistResident(repository, "Juan", "Cruz");
+    int id = resident.getId().value();
+
+    service.updateResident(id, "", "Dela Cruz", "New Address", "09181234567", "juanmiguel@example.com");
+
+    std::optional<Resident> stored = repository.findById(id);
+    CHECK(stored.has_value());
+    CHECK(stored->getFirstName() == "Juan"); // unchanged
+    CHECK(stored->getLastName() == "Cruz");  // unchanged
+}
+
+// T06 Required Test 7: Updating a nonexistent Resident is handled safely
+DROGON_TEST(UpdatingNonexistentResidentIsHandledSafelyTest)
+{
+    Database db(makeTempDbPath("update_not_found"));
+    ResidentRepository repository(db);
+    ResidentValidator validator;
+    ResidentUpdateService service(validator, repository);
+
+    ResidentUpdateResult result = service.updateResident(
+        999999, "Juan", "Cruz", "Some Address", "09171234567", "juan@example.com");
+
+    CHECK(!result.success);
+    CHECK(result.residentNotFound);
+}
+
+// T06 Required Test 8: Nonexistent update does not create a Resident
+DROGON_TEST(NonexistentUpdateDoesNotCreateResidentTest)
+{
+    std::string dbPath = makeTempDbPath("update_not_found_no_create");
+    Database db(dbPath);
+    ResidentRepository repository(db);
+    ResidentValidator validator;
+    ResidentUpdateService service(validator, repository);
+
+    int countBefore = countResidentsInDatabase(dbPath);
+    service.updateResident(999999, "Juan", "Cruz", "Some Address", "09171234567", "juan@example.com");
+    int countAfter = countResidentsInDatabase(dbPath);
+
+    CHECK(countAfter == countBefore);
+}
+
+// T06 Required Test 9: Updated Resident is visible through T05 querying
+DROGON_TEST(UpdatedResidentIsVisibleThroughSearchTest)
+{
+    Database db(makeTempDbPath("update_visible_search"));
+    ResidentRepository repository(db);
+    ResidentValidator validator;
+    ResidentUpdateService updateService(validator, repository);
+    ResidentSearchService searchService(repository);
+
+    Resident resident = persistResident(repository, "Juan", "Cruz");
+    int id = resident.getId().value();
+
+    updateService.updateResident(id, "Miguel", "Santos", "New Address", "09181234567", "miguel@example.com");
+
+    std::vector<Resident> results = searchService.searchResidents("Miguel");
+
+    CHECK(results.size() == 1);
+    CHECK(results[0].getId().value() == id);
+}
+
+// T06 Required Test 10: Updated information and contact number are preserved
+DROGON_TEST(UpdatedContactNumberPreservesLeadingZeroTest)
+{
+    Database db(makeTempDbPath("update_contact_number"));
+    ResidentRepository repository(db);
+    ResidentValidator validator;
+    ResidentUpdateService service(validator, repository);
+
+    Resident resident = persistResident(repository, "Juan", "Cruz");
+    int id = resident.getId().value();
+
+    ResidentUpdateResult result = service.updateResident(
+        id, "Juan", "Cruz", "Some Address", "09181234567", "juan@example.com");
+
+    CHECK(result.success);
+    std::optional<Resident> stored = repository.findById(id);
+    CHECK(stored->getContactNumber() == "09181234567");
+    CHECK(stored->getContactNumber()[0] == '0');
+    CHECK(stored->getId().value() == id);
+    CHECK(stored->getStatus() == ResidentStatus::Active);
+}
+
+// Persists a Resident with fully known details, for T07 preservation checks.
+Resident persistDetailedResident(ResidentRepository &repository,
+                                  ResidentStatus status = ResidentStatus::Active)
+{
+    Resident resident("Juan",
+                       "Dela Cruz",
+                       "Barangay Santo Tomas",
+                       "09171234567",
+                       "juan@example.com",
+                       status);
+    return repository.save(resident);
+}
+
+// T07 Required Test 1: Active Resident can be deactivated
+DROGON_TEST(ActiveResidentCanBeDeactivatedTest)
+{
+    Database db(makeTempDbPath("deactivate_active"));
+    ResidentRepository repository(db);
+    ResidentDeactivationService service(repository);
+
+    Resident resident = persistDetailedResident(repository);
+
+    ResidentDeactivationResult result = service.deactivateResident(resident.getId().value());
+
+    CHECK(result.success);
+    CHECK(result.stateChanged);
+    CHECK(!result.residentNotFound);
+    CHECK(result.resident.has_value());
+}
+
+// T07 Required Test 2: Status becomes Inactive in actual persistence
+DROGON_TEST(DeactivatedStatusIsPersistedTest)
+{
+    Database db(makeTempDbPath("deactivate_persisted"));
+    ResidentRepository repository(db);
+    ResidentDeactivationService service(repository);
+
+    Resident resident = persistDetailedResident(repository);
+    int id = resident.getId().value();
+
+    service.deactivateResident(id);
+
+    // A brand-new repository on the same connection proves the change is
+    // in the database, not in a temporary application object.
+    ResidentRepository freshRepository(db);
+    std::optional<Resident> stored = freshRepository.findById(id);
+    CHECK(stored.has_value());
+    CHECK(stored->getStatus() == ResidentStatus::Inactive);
+}
+
+// T07 Required Test 3: Resident ID is preserved
+DROGON_TEST(DeactivationPreservesResidentIdTest)
+{
+    Database db(makeTempDbPath("deactivate_preserve_id"));
+    ResidentRepository repository(db);
+    ResidentDeactivationService service(repository);
+
+    Resident resident = persistDetailedResident(repository);
+    int originalId = resident.getId().value();
+
+    ResidentDeactivationResult result = service.deactivateResident(originalId);
+
+    CHECK(result.resident->getId().value() == originalId);
+    CHECK(repository.findById(originalId)->getId().value() == originalId);
+}
+
+// T07 Required Test 4: Resident information is preserved
+DROGON_TEST(DeactivationPreservesResidentInformationTest)
+{
+    Database db(makeTempDbPath("deactivate_preserve_info"));
+    ResidentRepository repository(db);
+    ResidentDeactivationService service(repository);
+
+    Resident resident = persistDetailedResident(repository);
+    int id = resident.getId().value();
+
+    service.deactivateResident(id);
+
+    std::optional<Resident> stored = repository.findById(id);
+    CHECK(stored.has_value());
+    CHECK(stored->getFirstName() == "Juan");
+    CHECK(stored->getLastName() == "Dela Cruz");
+    CHECK(stored->getAddress() == "Barangay Santo Tomas");
+    CHECK(stored->getContactNumber() == "09171234567");
+    CHECK(stored->getContactNumber()[0] == '0');
+    CHECK(stored->getEmail() == "juan@example.com");
+}
+
+// T07 Required Test 5: Deactivated Resident remains persisted and retrievable
+DROGON_TEST(DeactivatedResidentRemainsRetrievableTest)
+{
+    std::string dbPath = makeTempDbPath("deactivate_retrievable");
+    Database db(dbPath);
+    ResidentRepository repository(db);
+    ResidentDeactivationService service(repository);
+
+    Resident resident = persistDetailedResident(repository);
+    int id = resident.getId().value();
+
+    int countBefore = countResidentsInDatabase(dbPath);
+    service.deactivateResident(id);
+    int countAfter = countResidentsInDatabase(dbPath);
+
+    std::optional<Resident> stored = repository.findById(id);
+    CHECK(countAfter == countBefore);
+    CHECK(stored.has_value());
+    CHECK(stored->getStatus() == ResidentStatus::Inactive);
+}
+
+// T07 Required Test 6: Deactivated Resident remains available through T05
+DROGON_TEST(DeactivatedResidentRemainsInSearchAndListingTest)
+{
+    Database db(makeTempDbPath("deactivate_t05"));
+    ResidentRepository repository(db);
+    ResidentDeactivationService deactivationService(repository);
+    ResidentSearchService searchService(repository);
+
+    Resident resident = persistResident(repository, "Juan", "Cruz");
+    int id = resident.getId().value();
+
+    deactivationService.deactivateResident(id);
+
+    std::vector<Resident> searchResults = searchService.searchResidents("Juan");
+    CHECK(searchResults.size() == 1);
+    CHECK(searchResults[0].getId().value() == id);
+    CHECK(searchResults[0].getStatus() == ResidentStatus::Inactive);
+
+    std::vector<Resident> listResults = searchService.listResidents();
+    CHECK(listResults.size() == 1);
+    CHECK(listResults[0].getStatus() == ResidentStatus::Inactive);
+}
+
+// T07 Required Test 7: Already-Inactive Resident is handled safely
+DROGON_TEST(AlreadyInactiveResidentIsHandledSafelyTest)
+{
+    std::string dbPath = makeTempDbPath("deactivate_already_inactive");
+    Database db(dbPath);
+    ResidentRepository repository(db);
+    ResidentDeactivationService service(repository);
+
+    Resident resident = persistDetailedResident(repository, ResidentStatus::Inactive);
+    int id = resident.getId().value();
+
+    int countBefore = countResidentsInDatabase(dbPath);
+    ResidentDeactivationResult first = service.deactivateResident(id);
+    ResidentDeactivationResult second = service.deactivateResident(id);
+    int countAfter = countResidentsInDatabase(dbPath);
+
+    CHECK(first.success);
+    CHECK(!first.stateChanged);
+    CHECK(second.success);
+    CHECK(!second.stateChanged);
+    CHECK(countAfter == countBefore);
+
+    std::optional<Resident> stored = repository.findById(id);
+    CHECK(stored->getId().value() == id);
+    CHECK(stored->getStatus() == ResidentStatus::Inactive);
+    CHECK(stored->getFirstName() == "Juan");
+    CHECK(stored->getLastName() == "Dela Cruz");
+    CHECK(stored->getAddress() == "Barangay Santo Tomas");
+    CHECK(stored->getContactNumber() == "09171234567");
+    CHECK(stored->getEmail() == "juan@example.com");
+}
+
+// T07 Required Test 8: Nonexistent Resident is handled safely
+DROGON_TEST(DeactivatingNonexistentResidentIsHandledSafelyTest)
+{
+    Database db(makeTempDbPath("deactivate_not_found"));
+    ResidentRepository repository(db);
+    ResidentDeactivationService service(repository);
+
+    ResidentDeactivationResult result = service.deactivateResident(999999);
+
+    CHECK(!result.success);
+    CHECK(result.residentNotFound);
+    CHECK(!result.stateChanged);
+    CHECK(!result.resident.has_value());
+}
+
+// T07 Required Test 9: Nonexistent deactivation does not create or delete records
+DROGON_TEST(NonexistentDeactivationDoesNotCreateOrDeleteRecordsTest)
+{
+    std::string dbPath = makeTempDbPath("deactivate_not_found_no_change");
+    Database db(dbPath);
+    ResidentRepository repository(db);
+    ResidentDeactivationService service(repository);
+
+    Resident resident = persistDetailedResident(repository);
+    int id = resident.getId().value();
+
+    int countBefore = countResidentsInDatabase(dbPath);
+    service.deactivateResident(999999);
+    int countAfter = countResidentsInDatabase(dbPath);
+
+    CHECK(countAfter == countBefore);
+    CHECK(!repository.findById(999999).has_value());
+
+    std::optional<Resident> stored = repository.findById(id);
+    CHECK(stored.has_value());
+    CHECK(stored->getStatus() == ResidentStatus::Active);
+    CHECK(stored->getFirstName() == "Juan");
+}
+
+// T07 Required Test 10: Deactivating one Resident does not affect another
+DROGON_TEST(DeactivatingOneResidentDoesNotAffectAnotherTest)
+{
+    Database db(makeTempDbPath("deactivate_isolated"));
+    ResidentRepository repository(db);
+    ResidentDeactivationService service(repository);
+
+    Resident first = persistResident(repository, "Juan", "Cruz");
+    Resident second = persistResident(repository, "Maria", "Santos");
+    Resident third = persistResident(repository, "Pedro", "Reyes");
+
+    service.deactivateResident(second.getId().value());
+
+    std::optional<Resident> storedFirst = repository.findById(first.getId().value());
+    std::optional<Resident> storedSecond = repository.findById(second.getId().value());
+    std::optional<Resident> storedThird = repository.findById(third.getId().value());
+
+    CHECK(storedFirst->getStatus() == ResidentStatus::Active);
+    CHECK(storedSecond->getStatus() == ResidentStatus::Inactive);
+    CHECK(storedThird->getStatus() == ResidentStatus::Active);
+
+    CHECK(storedFirst->getFirstName() == "Juan");
+    CHECK(storedFirst->getLastName() == "Cruz");
+    CHECK(storedFirst->getContactNumber() == "09171234567");
+    CHECK(storedThird->getFirstName() == "Pedro");
+    CHECK(storedThird->getLastName() == "Reyes");
+}
+
+// T08 Required Test 1: Service Request can be created
+DROGON_TEST(ServiceRequestCanBeCreatedTest)
+{
+    ServiceRequest request(25,
+                           "Barangay Clearance",
+                           "Request for employment requirement",
+                           "2026-09-25");
+
+    CHECK(request.getResidentId() == 25);
+}
+
+// T08 Required Test 2: Service Request information is accessible
+DROGON_TEST(ServiceRequestInformationIsAccessibleTest)
+{
+    ServiceRequest request(25,
+                           "Barangay Clearance",
+                           "Request for employment requirement",
+                           "2026-09-25");
+
+    CHECK(request.getResidentId() == 25);
+    CHECK(request.getServiceType() == "Barangay Clearance");
+    CHECK(request.getDescription() == "Request for employment requirement");
+    CHECK(request.getDateRequested() == "2026-09-25");
+}
+
+// T08 Required Test 3: Resident ID is preserved
+DROGON_TEST(ServiceRequestPreservesResidentIdTest)
+{
+    ServiceRequest request(25, "Permit Request", "Business permit", "2026-09-25");
+
+    CHECK(request.getResidentId() == 25);
+}
+
+// T08 Required Test 4: New Service Request has an unassigned ID
+DROGON_TEST(NewServiceRequestHasNoIdTest)
+{
+    ServiceRequest request(25, "Permit Request", "Business permit", "2026-09-25");
+
+    CHECK(!request.getId().has_value());
+}
+
+// T08 Required Test 5: New Service Request defaults to Pending
+DROGON_TEST(NewServiceRequestDefaultsToPendingTest)
+{
+    ServiceRequest request(25, "Permit Request", "Business permit", "2026-09-25");
+
+    CHECK(request.getStatus() == ServiceRequestStatus::Pending);
+}
+
+// T08 Required Test 6: Service Request information is independent between objects
+DROGON_TEST(ServiceRequestsAreIndependentTest)
+{
+    ServiceRequest first(25, "Barangay Clearance", "Employment requirement", "2026-09-25");
+    ServiceRequest second(31, "Community Assistance", "Medical assistance", "2026-10-01");
+
+    CHECK(first.getResidentId() == 25);
+    CHECK(first.getServiceType() == "Barangay Clearance");
+    CHECK(first.getDescription() == "Employment requirement");
+    CHECK(first.getDateRequested() == "2026-09-25");
+
+    CHECK(second.getResidentId() == 31);
+    CHECK(second.getServiceType() == "Community Assistance");
+    CHECK(second.getDescription() == "Medical assistance");
+    CHECK(second.getDateRequested() == "2026-10-01");
+}
+
+// Directly queries SQLite to count Service Request rows, bypassing our own
+// repository, to prove rejected submissions never reach the database.
+int countServiceRequestsInDatabase(const std::string &databasePath)
+{
+    sqlite3 *database = nullptr;
+    sqlite3_open(databasePath.c_str(), &database);
+
+    const char *sql = "SELECT COUNT(*) FROM service_requests";
+    sqlite3_stmt *statement = nullptr;
+    sqlite3_prepare_v2(database, sql, -1, &statement, nullptr);
+    sqlite3_step(statement);
+
+    int count = sqlite3_column_int(statement, 0);
+
+    sqlite3_finalize(statement);
+    sqlite3_close(database);
+
+    return count;
+}
+
+// A valid new Service Request for the given Resident (id unassigned, Pending).
+ServiceRequest makeValidServiceRequest(int residentId)
+{
+    return ServiceRequest(residentId,
+                          "Barangay Clearance",
+                          "Request for employment requirement",
+                          "2026-09-15");
+}
+
+// T09 Required Test 1: Valid Service Request submission succeeds
+DROGON_TEST(ValidServiceRequestSubmissionSucceedsTest)
+{
+    Database db(makeTempDbPath("sr_submit_valid"));
+    ResidentRepository residentRepository(db);
+    ServiceRequestRepository requestRepository(db);
+    ServiceRequestValidator validator;
+    ServiceRequestSubmissionService service(validator, residentRepository, requestRepository);
+
+    Resident resident = persistResident(residentRepository, "Juan", "Cruz");
+
+    ServiceRequestSubmissionResult result =
+        service.submitServiceRequest(makeValidServiceRequest(resident.getId().value()));
+
+    CHECK(result.success);
+    CHECK(!result.residentNotFound);
+    CHECK(!result.residentInactive);
+    CHECK(result.errors.empty());
+    CHECK(result.serviceRequest.has_value());
+}
+
+// T09 Required Test 2: Submitted Service Request receives a generated ID
+DROGON_TEST(SubmittedServiceRequestReceivesGeneratedIdTest)
+{
+    Database db(makeTempDbPath("sr_generated_id"));
+    ResidentRepository residentRepository(db);
+    ServiceRequestRepository requestRepository(db);
+    ServiceRequestValidator validator;
+    ServiceRequestSubmissionService service(validator, residentRepository, requestRepository);
+
+    Resident resident = persistResident(residentRepository, "Juan", "Cruz");
+    ServiceRequest request = makeValidServiceRequest(resident.getId().value());
+
+    CHECK(!request.getId().has_value()); // unassigned before submission
+
+    ServiceRequestSubmissionResult result = service.submitServiceRequest(request);
+
+    CHECK(result.success);
+    CHECK(result.serviceRequest->getId().has_value());
+    CHECK(result.serviceRequest->getId().value() > 0);
+}
+
+// T09 Required Test 3: Submitted Service Request is persisted and retrievable
+DROGON_TEST(SubmittedServiceRequestIsRetrievableTest)
+{
+    Database db(makeTempDbPath("sr_retrievable"));
+    ResidentRepository residentRepository(db);
+    ServiceRequestRepository requestRepository(db);
+    ServiceRequestValidator validator;
+    ServiceRequestSubmissionService service(validator, residentRepository, requestRepository);
+
+    Resident resident = persistResident(residentRepository, "Juan", "Cruz");
+    ServiceRequestSubmissionResult result =
+        service.submitServiceRequest(makeValidServiceRequest(resident.getId().value()));
+
+    int id = result.serviceRequest->getId().value();
+    std::optional<ServiceRequest> stored = requestRepository.findById(id);
+
+    CHECK(stored.has_value());
+    CHECK(stored->getId().value() == id);
+}
+
+// T09 Required Test 4: Submitted Service Request information is preserved
+DROGON_TEST(SubmittedServiceRequestInformationIsPreservedTest)
+{
+    Database db(makeTempDbPath("sr_preserved"));
+    ResidentRepository residentRepository(db);
+    ServiceRequestRepository requestRepository(db);
+    ServiceRequestValidator validator;
+    ServiceRequestSubmissionService service(validator, residentRepository, requestRepository);
+
+    Resident resident = persistResident(residentRepository, "Juan", "Cruz");
+    int residentId = resident.getId().value();
+
+    ServiceRequestSubmissionResult result =
+        service.submitServiceRequest(makeValidServiceRequest(residentId));
+
+    std::optional<ServiceRequest> stored =
+        requestRepository.findById(result.serviceRequest->getId().value());
+
+    CHECK(stored.has_value());
+    CHECK(stored->getResidentId() == residentId);
+    CHECK(stored->getServiceType() == "Barangay Clearance");
+    CHECK(stored->getDescription() == "Request for employment requirement");
+    CHECK(stored->getDateRequested() == "2026-09-15");
+    CHECK(stored->getStatus() == ServiceRequestStatus::Pending);
+}
+
+// T09 Required Test 5: Submitted Service Request status is Pending
+DROGON_TEST(SubmittedServiceRequestStatusIsPendingTest)
+{
+    Database db(makeTempDbPath("sr_pending"));
+    ResidentRepository residentRepository(db);
+    ServiceRequestRepository requestRepository(db);
+    ServiceRequestValidator validator;
+    ServiceRequestSubmissionService service(validator, residentRepository, requestRepository);
+
+    Resident resident = persistResident(residentRepository, "Juan", "Cruz");
+    ServiceRequestSubmissionResult result =
+        service.submitServiceRequest(makeValidServiceRequest(resident.getId().value()));
+
+    CHECK(result.serviceRequest->getStatus() == ServiceRequestStatus::Pending);
+    CHECK(requestRepository.findById(result.serviceRequest->getId().value())->getStatus() ==
+          ServiceRequestStatus::Pending);
+}
+
+// T09 Required Test 6: Blank service type fails validation
+DROGON_TEST(BlankServiceTypeFailsValidationTest)
+{
+    Database db(makeTempDbPath("sr_blank_type"));
+    ResidentRepository residentRepository(db);
+    ServiceRequestRepository requestRepository(db);
+    ServiceRequestValidator validator;
+    ServiceRequestSubmissionService service(validator, residentRepository, requestRepository);
+
+    Resident resident = persistResident(residentRepository, "Juan", "Cruz");
+    int residentId = resident.getId().value();
+
+    ServiceRequestSubmissionResult emptyResult = service.submitServiceRequest(
+        ServiceRequest(residentId, "", "Some details", "2026-09-15"));
+    ServiceRequestSubmissionResult whitespaceResult = service.submitServiceRequest(
+        ServiceRequest(residentId, "   ", "Some details", "2026-09-15"));
+
+    CHECK(!emptyResult.success);
+    CHECK(std::find(emptyResult.errors.begin(), emptyResult.errors.end(), "serviceType") != emptyResult.errors.end());
+    CHECK(!whitespaceResult.success);
+    CHECK(std::find(whitespaceResult.errors.begin(), whitespaceResult.errors.end(), "serviceType") != whitespaceResult.errors.end());
+}
+
+// T09 Required Test 7: Blank description fails validation
+DROGON_TEST(BlankDescriptionFailsValidationTest)
+{
+    Database db(makeTempDbPath("sr_blank_description"));
+    ResidentRepository residentRepository(db);
+    ServiceRequestRepository requestRepository(db);
+    ServiceRequestValidator validator;
+    ServiceRequestSubmissionService service(validator, residentRepository, requestRepository);
+
+    Resident resident = persistResident(residentRepository, "Juan", "Cruz");
+    int residentId = resident.getId().value();
+
+    ServiceRequestSubmissionResult emptyResult = service.submitServiceRequest(
+        ServiceRequest(residentId, "Permit Request", "", "2026-09-15"));
+    ServiceRequestSubmissionResult whitespaceResult = service.submitServiceRequest(
+        ServiceRequest(residentId, "Permit Request", "  \t ", "2026-09-15"));
+
+    CHECK(!emptyResult.success);
+    CHECK(std::find(emptyResult.errors.begin(), emptyResult.errors.end(), "description") != emptyResult.errors.end());
+    CHECK(!whitespaceResult.success);
+    CHECK(std::find(whitespaceResult.errors.begin(), whitespaceResult.errors.end(), "description") != whitespaceResult.errors.end());
+}
+
+// T09 Required Test 8: Invalid request does not reach persistence
+DROGON_TEST(InvalidServiceRequestDoesNotReachPersistenceTest)
+{
+    std::string dbPath = makeTempDbPath("sr_invalid_not_persisted");
+    Database db(dbPath);
+    ResidentRepository residentRepository(db);
+    ServiceRequestRepository requestRepository(db);
+    ServiceRequestValidator validator;
+    ServiceRequestSubmissionService service(validator, residentRepository, requestRepository);
+
+    Resident resident = persistResident(residentRepository, "Juan", "Cruz");
+
+    int countBefore = countServiceRequestsInDatabase(dbPath);
+    service.submitServiceRequest(ServiceRequest(resident.getId().value(), "", "", "not-a-date"));
+    int countAfter = countServiceRequestsInDatabase(dbPath);
+
+    CHECK(countAfter == countBefore);
+}
+
+// T09 Required Test 9: Nonexistent Resident prevents submission
+DROGON_TEST(NonexistentResidentPreventsSubmissionTest)
+{
+    std::string dbPath = makeTempDbPath("sr_resident_not_found");
+    Database db(dbPath);
+    ResidentRepository residentRepository(db);
+    ServiceRequestRepository requestRepository(db);
+    ServiceRequestValidator validator;
+    ServiceRequestSubmissionService service(validator, residentRepository, requestRepository);
+
+    int countBefore = countServiceRequestsInDatabase(dbPath);
+    ServiceRequestSubmissionResult result = service.submitServiceRequest(makeValidServiceRequest(999999));
+    int countAfter = countServiceRequestsInDatabase(dbPath);
+
+    CHECK(!result.success);
+    CHECK(result.residentNotFound);
+    CHECK(!result.residentInactive);
+    CHECK(result.errors.empty());
+    CHECK(!result.serviceRequest.has_value());
+    CHECK(countAfter == countBefore);
+}
+
+// T09 Required Test 10: Inactive Resident cannot submit a new Service Request
+DROGON_TEST(InactiveResidentCannotSubmitServiceRequestTest)
+{
+    std::string dbPath = makeTempDbPath("sr_resident_inactive");
+    Database db(dbPath);
+    ResidentRepository residentRepository(db);
+    ServiceRequestRepository requestRepository(db);
+    ServiceRequestValidator validator;
+    ServiceRequestSubmissionService service(validator, residentRepository, requestRepository);
+
+    Resident resident = persistResident(residentRepository, "Juan", "Cruz", ResidentStatus::Inactive);
+    int residentId = resident.getId().value();
+
+    int countBefore = countServiceRequestsInDatabase(dbPath);
+    ServiceRequestSubmissionResult result = service.submitServiceRequest(makeValidServiceRequest(residentId));
+    int countAfter = countServiceRequestsInDatabase(dbPath);
+
+    CHECK(!result.success);
+    CHECK(result.residentInactive);
+    CHECK(!result.residentNotFound);
+    CHECK(!result.serviceRequest.has_value());
+    CHECK(countAfter == countBefore);
+    CHECK(residentRepository.findById(residentId)->getStatus() == ResidentStatus::Inactive);
+}
+
+// T09 Required Test 11: Non-Pending initial status is rejected
+DROGON_TEST(NonPendingInitialStatusIsRejectedTest)
+{
+    std::string dbPath = makeTempDbPath("sr_non_pending");
+    Database db(dbPath);
+    ResidentRepository residentRepository(db);
+    ServiceRequestRepository requestRepository(db);
+    ServiceRequestValidator validator;
+    ServiceRequestSubmissionService service(validator, residentRepository, requestRepository);
+
+    Resident resident = persistResident(residentRepository, "Juan", "Cruz");
+    int residentId = resident.getId().value();
+
+    ServiceRequestStatus badStatuses[] = {ServiceRequestStatus::InProgress,
+                                          ServiceRequestStatus::Completed,
+                                          ServiceRequestStatus::Cancelled};
+
+    for (ServiceRequestStatus badStatus : badStatuses)
+    {
+        ServiceRequest request(residentId, "Permit Request", "Business permit", "2026-09-15", badStatus);
+        ServiceRequestSubmissionResult result = service.submitServiceRequest(request);
+
+        CHECK(!result.success);
+        CHECK(std::find(result.errors.begin(), result.errors.end(), "status") != result.errors.end());
+    }
+
+    CHECK(countServiceRequestsInDatabase(dbPath) == 0);
+}
+
+// T09 Required Test 12: Service Request persists across repository access
+DROGON_TEST(ServiceRequestPersistsAcrossRepositoryAccessTest)
+{
+    std::string dbPath = makeTempDbPath("sr_persists");
+    int residentId = 0;
+    int requestId = 0;
+
+    {
+        Database db(dbPath);
+        ResidentRepository residentRepository(db);
+        ServiceRequestRepository requestRepository(db);
+        ServiceRequestValidator validator;
+        ServiceRequestSubmissionService service(validator, residentRepository, requestRepository);
+
+        Resident resident = persistResident(residentRepository, "Juan", "Cruz");
+        residentId = resident.getId().value();
+
+        ServiceRequestSubmissionResult result = service.submitServiceRequest(makeValidServiceRequest(residentId));
+        requestId = result.serviceRequest->getId().value();
+    } // first connection closed here
+
+    Database secondDb(dbPath);
+    ServiceRequestRepository secondRepository(secondDb);
+    std::optional<ServiceRequest> stored = secondRepository.findById(requestId);
+
+    CHECK(stored.has_value());
+    CHECK(stored->getResidentId() == residentId);
+    CHECK(stored->getServiceType() == "Barangay Clearance");
+    CHECK(stored->getStatus() == ServiceRequestStatus::Pending);
+}
+
+// T09 Required Test 13: Submission does not modify the Resident
+DROGON_TEST(SubmissionDoesNotModifyResidentTest)
+{
+    Database db(makeTempDbPath("sr_resident_unchanged"));
+    ResidentRepository residentRepository(db);
+    ServiceRequestRepository requestRepository(db);
+    ServiceRequestValidator validator;
+    ServiceRequestSubmissionService service(validator, residentRepository, requestRepository);
+
+    Resident resident = persistDetailedResident(residentRepository);
+    int id = resident.getId().value();
+
+    service.submitServiceRequest(makeValidServiceRequest(id));
+
+    std::optional<Resident> stored = residentRepository.findById(id);
+    CHECK(stored.has_value());
+    CHECK(stored->getId().value() == id);
+    CHECK(stored->getFirstName() == "Juan");
+    CHECK(stored->getLastName() == "Dela Cruz");
+    CHECK(stored->getAddress() == "Barangay Santo Tomas");
+    CHECK(stored->getContactNumber() == "09171234567");
+    CHECK(stored->getEmail() == "juan@example.com");
+    CHECK(stored->getStatus() == ResidentStatus::Active);
+}
+
+// T09 Date Validation Test: missing or invalid dates cannot be submitted
+DROGON_TEST(InvalidOrMissingDateFailsValidationTest)
+{
+    ServiceRequestValidator validator;
+
+    const std::string badDates[] = {"", "   ", "2026/09/15", "15-09-2026", "2026-9-15",
+                                    "2026-13-01", "2026-02-30", "2026-00-10", "2026-04-31",
+                                    "2025-02-29", "abcd-ef-gh"};
+
+    for (const std::string &badDate : badDates)
+    {
+        std::vector<std::string> errors =
+            validator.validate(ServiceRequest(25, "Permit Request", "Business permit", badDate));
+
+        CHECK(std::find(errors.begin(), errors.end(), "dateRequested") != errors.end());
+    }
+
+    // Real dates, including a leap day, are accepted.
+    CHECK(validator.isValid(ServiceRequest(25, "Permit Request", "Business permit", "2026-09-15")));
+    CHECK(validator.isValid(ServiceRequest(25, "Permit Request", "Business permit", "2024-02-29")));
+}
+
+// Extra validator test: an already-assigned id and a non-positive Resident id are rejected
+DROGON_TEST(AssignedIdAndInvalidResidentIdFailValidationTest)
+{
+    ServiceRequestValidator validator;
+
+    ServiceRequest alreadyPersisted(17, 25, "Permit Request", "Business permit", "2026-09-15",
+                                    ServiceRequestStatus::Pending);
+    std::vector<std::string> idErrors = validator.validate(alreadyPersisted);
+    CHECK(std::find(idErrors.begin(), idErrors.end(), "id") != idErrors.end());
+
+    std::vector<std::string> zeroErrors =
+        validator.validate(ServiceRequest(0, "Permit Request", "Business permit", "2026-09-15"));
+    CHECK(std::find(zeroErrors.begin(), zeroErrors.end(), "residentId") != zeroErrors.end());
+
+    std::vector<std::string> negativeErrors =
+        validator.validate(ServiceRequest(-5, "Permit Request", "Business permit", "2026-09-15"));
+    CHECK(std::find(negativeErrors.begin(), negativeErrors.end(), "residentId") != negativeErrors.end());
+}
+
+// Extra test: an Inactive Resident stays searchable even though it cannot submit
+DROGON_TEST(InactiveResidentRemainsSearchableAfterRejectedSubmissionTest)
+{
+    Database db(makeTempDbPath("sr_inactive_searchable"));
+    ResidentRepository residentRepository(db);
+    ServiceRequestRepository requestRepository(db);
+    ServiceRequestValidator validator;
+    ServiceRequestSubmissionService service(validator, residentRepository, requestRepository);
+    ResidentSearchService searchService(residentRepository);
+
+    Resident resident = persistResident(residentRepository, "Juan", "Cruz", ResidentStatus::Inactive);
+    service.submitServiceRequest(makeValidServiceRequest(resident.getId().value()));
+
+    std::vector<Resident> results = searchService.searchResidents("Juan");
+    CHECK(results.size() == 1);
+    CHECK(results[0].getStatus() == ResidentStatus::Inactive);
+}
+
+// ===========================================================================
+// T10: Manage Service Request Status
+// ===========================================================================
+
+// Reads the status column straight from SQLite, bypassing our repository, so
+// tests prove what is REALLY persisted.
+std::string readStatusFromDatabase(const std::string &databasePath, int serviceRequestId)
+{
+    sqlite3 *database = nullptr;
+    sqlite3_open(databasePath.c_str(), &database);
+
+    sqlite3_stmt *statement = nullptr;
+    sqlite3_prepare_v2(database, "SELECT status FROM service_requests WHERE id = ?", -1, &statement, nullptr);
+    sqlite3_bind_int(statement, 1, serviceRequestId);
+
+    std::string status = "(no row)";
+    if (sqlite3_step(statement) == SQLITE_ROW)
+    {
+        status = reinterpret_cast<const char *>(sqlite3_column_text(statement, 0));
+    }
+
+    sqlite3_finalize(statement);
+    sqlite3_close(database);
+
+    return status;
+}
+
+// Submits a valid request through the real T09 service so every T10 test
+// starts from a genuinely persisted Pending request. Returns its id.
+int submitPendingRequest(Database &db, int residentId)
+{
+    ResidentRepository residentRepository(db);
+    ServiceRequestRepository requestRepository(db);
+    ServiceRequestValidator validator;
+    ServiceRequestSubmissionService submission(validator, residentRepository, requestRepository);
+
+    ServiceRequestSubmissionResult result = submission.submitServiceRequest(makeValidServiceRequest(residentId));
+    return result.serviceRequest->getId().value();
+}
+
+// T10 Required Test 1: Pending can move to In Progress
+DROGON_TEST(PendingCanMoveToInProgressTest)
+{
+    std::string path = makeTempDbPath("sr_status_pending_to_inprogress");
+    Database db(path);
+    ResidentRepository residentRepository(db);
+    ServiceRequestRepository requestRepository(db);
+    ServiceRequestStatusService service(requestRepository);
+
+    Resident resident = persistResident(residentRepository, "Juan", "Cruz");
+    int id = submitPendingRequest(db, resident.getId().value());
+
+    ServiceRequestStatusResult result = service.changeStatus(id, "In Progress");
+
+    CHECK(result.success);
+    CHECK(!result.notFound);
+    CHECK(!result.unsupportedStatus);
+    CHECK(!result.invalidTransition);
+    CHECK(result.serviceRequest.has_value());
+    CHECK(result.serviceRequest->getStatus() == ServiceRequestStatus::InProgress);
+    CHECK(requestRepository.findById(id)->getStatus() == ServiceRequestStatus::InProgress);
+    CHECK(readStatusFromDatabase(path, id) == "In Progress");
+}
+
+// T10 Required Test 2: Pending can move to Cancelled
+DROGON_TEST(PendingCanMoveToCancelledTest)
+{
+    std::string path = makeTempDbPath("sr_status_pending_to_cancelled");
+    Database db(path);
+    ResidentRepository residentRepository(db);
+    ServiceRequestRepository requestRepository(db);
+    ServiceRequestStatusService service(requestRepository);
+
+    Resident resident = persistResident(residentRepository, "Juan", "Cruz");
+    int id = submitPendingRequest(db, resident.getId().value());
+
+    ServiceRequestStatusResult result = service.changeStatus(id, "Cancelled");
+
+    CHECK(result.success);
+    CHECK(result.serviceRequest->getStatus() == ServiceRequestStatus::Cancelled);
+    CHECK(readStatusFromDatabase(path, id) == "Cancelled");
+}
+
+// T10 Required Test 3: In Progress can move to Completed
+// The In Progress state is reached through the real workflow, not by
+// hand-writing a database row.
+DROGON_TEST(InProgressCanMoveToCompletedTest)
+{
+    std::string path = makeTempDbPath("sr_status_inprogress_to_completed");
+    Database db(path);
+    ResidentRepository residentRepository(db);
+    ServiceRequestRepository requestRepository(db);
+    ServiceRequestStatusService service(requestRepository);
+
+    Resident resident = persistResident(residentRepository, "Juan", "Cruz");
+    int id = submitPendingRequest(db, resident.getId().value());
+
+    REQUIRE(service.changeStatus(id, "In Progress").success);
+
+    ServiceRequestStatusResult result = service.changeStatus(id, "Completed");
+
+    CHECK(result.success);
+    CHECK(result.serviceRequest->getStatus() == ServiceRequestStatus::Completed);
+    CHECK(readStatusFromDatabase(path, id) == "Completed");
+}
+
+// T10 Required Test 4: In Progress can move to Cancelled
+DROGON_TEST(InProgressCanMoveToCancelledTest)
+{
+    std::string path = makeTempDbPath("sr_status_inprogress_to_cancelled");
+    Database db(path);
+    ResidentRepository residentRepository(db);
+    ServiceRequestRepository requestRepository(db);
+    ServiceRequestStatusService service(requestRepository);
+
+    Resident resident = persistResident(residentRepository, "Juan", "Cruz");
+    int id = submitPendingRequest(db, resident.getId().value());
+
+    REQUIRE(service.changeStatus(id, "In Progress").success);
+
+    ServiceRequestStatusResult result = service.changeStatus(id, "Cancelled");
+
+    CHECK(result.success);
+    CHECK(result.serviceRequest->getStatus() == ServiceRequestStatus::Cancelled);
+    CHECK(readStatusFromDatabase(path, id) == "Cancelled");
+}
+
+// T10 Required Test 5: Pending cannot move directly to Completed
+DROGON_TEST(PendingCannotMoveDirectlyToCompletedTest)
+{
+    std::string path = makeTempDbPath("sr_status_pending_to_completed");
+    Database db(path);
+    ResidentRepository residentRepository(db);
+    ServiceRequestRepository requestRepository(db);
+    ServiceRequestStatusService service(requestRepository);
+
+    Resident resident = persistResident(residentRepository, "Juan", "Cruz");
+    int id = submitPendingRequest(db, resident.getId().value());
+
+    ServiceRequestStatusResult result = service.changeStatus(id, "Completed");
+
+    CHECK(!result.success);
+    CHECK(result.invalidTransition);
+    CHECK(!result.serviceRequest.has_value());
+    CHECK(requestRepository.findById(id)->getStatus() == ServiceRequestStatus::Pending);
+    CHECK(readStatusFromDatabase(path, id) == "Pending");
+}
+
+// T10 Required Test 6: In Progress cannot return to Pending
+DROGON_TEST(InProgressCannotReturnToPendingTest)
+{
+    std::string path = makeTempDbPath("sr_status_inprogress_to_pending");
+    Database db(path);
+    ResidentRepository residentRepository(db);
+    ServiceRequestRepository requestRepository(db);
+    ServiceRequestStatusService service(requestRepository);
+
+    Resident resident = persistResident(residentRepository, "Juan", "Cruz");
+    int id = submitPendingRequest(db, resident.getId().value());
+
+    REQUIRE(service.changeStatus(id, "In Progress").success);
+
+    ServiceRequestStatusResult result = service.changeStatus(id, "Pending");
+
+    CHECK(!result.success);
+    CHECK(result.invalidTransition);
+    CHECK(requestRepository.findById(id)->getStatus() == ServiceRequestStatus::InProgress);
+    CHECK(readStatusFromDatabase(path, id) == "In Progress");
+}
+
+// T10 Required Test 7: Completed is terminal
+DROGON_TEST(CompletedIsTerminalTest)
+{
+    std::string path = makeTempDbPath("sr_status_completed_terminal");
+    Database db(path);
+    ResidentRepository residentRepository(db);
+    ServiceRequestRepository requestRepository(db);
+    ServiceRequestStatusService service(requestRepository);
+
+    Resident resident = persistResident(residentRepository, "Juan", "Cruz");
+    int id = submitPendingRequest(db, resident.getId().value());
+
+    REQUIRE(service.changeStatus(id, "In Progress").success);
+    REQUIRE(service.changeStatus(id, "Completed").success);
+
+    ServiceRequestStatusResult toPending = service.changeStatus(id, "Pending");
+    ServiceRequestStatusResult toInProgress = service.changeStatus(id, "In Progress");
+    ServiceRequestStatusResult toCancelled = service.changeStatus(id, "Cancelled");
+
+    CHECK(!toPending.success);
+    CHECK(toPending.invalidTransition);
+    CHECK(!toInProgress.success);
+    CHECK(toInProgress.invalidTransition);
+    CHECK(!toCancelled.success);
+    CHECK(toCancelled.invalidTransition);
+    CHECK(requestRepository.findById(id)->getStatus() == ServiceRequestStatus::Completed);
+    CHECK(readStatusFromDatabase(path, id) == "Completed");
+}
+
+// T10 Required Test 8: Cancelled is terminal
+DROGON_TEST(CancelledIsTerminalTest)
+{
+    std::string path = makeTempDbPath("sr_status_cancelled_terminal");
+    Database db(path);
+    ResidentRepository residentRepository(db);
+    ServiceRequestRepository requestRepository(db);
+    ServiceRequestStatusService service(requestRepository);
+
+    Resident resident = persistResident(residentRepository, "Juan", "Cruz");
+    int id = submitPendingRequest(db, resident.getId().value());
+
+    REQUIRE(service.changeStatus(id, "Cancelled").success);
+
+    ServiceRequestStatusResult toPending = service.changeStatus(id, "Pending");
+    ServiceRequestStatusResult toInProgress = service.changeStatus(id, "In Progress");
+    ServiceRequestStatusResult toCompleted = service.changeStatus(id, "Completed");
+
+    CHECK(!toPending.success);
+    CHECK(toPending.invalidTransition);
+    CHECK(!toInProgress.success);
+    CHECK(toInProgress.invalidTransition);
+    CHECK(!toCompleted.success);
+    CHECK(toCompleted.invalidTransition);
+    CHECK(requestRepository.findById(id)->getStatus() == ServiceRequestStatus::Cancelled);
+    CHECK(readStatusFromDatabase(path, id) == "Cancelled");
+}
+
+// T10 Required Test 9: Unsupported status is rejected
+DROGON_TEST(UnsupportedStatusIsRejectedTest)
+{
+    std::string path = makeTempDbPath("sr_status_unsupported");
+    Database db(path);
+    ResidentRepository residentRepository(db);
+    ServiceRequestRepository requestRepository(db);
+    ServiceRequestStatusService service(requestRepository);
+
+    Resident resident = persistResident(residentRepository, "Juan", "Cruz");
+    int id = submitPendingRequest(db, resident.getId().value());
+
+    ServiceRequestStatusResult result = service.changeStatus(id, "Approved");
+
+    CHECK(!result.success);
+    CHECK(result.unsupportedStatus);
+    CHECK(!result.invalidTransition);
+    CHECK(!result.notFound);
+    CHECK(!result.serviceRequest.has_value());
+    CHECK(requestRepository.findById(id)->getStatus() == ServiceRequestStatus::Pending);
+    CHECK(readStatusFromDatabase(path, id) == "Pending");
+}
+
+// T10 Required Test 10: Nonexistent Service Request is handled safely
+DROGON_TEST(NonexistentServiceRequestIsHandledSafelyTest)
+{
+    std::string path = makeTempDbPath("sr_status_not_found");
+    Database db(path);
+    ResidentRepository residentRepository(db);
+    ServiceRequestRepository requestRepository(db);
+    ServiceRequestStatusService service(requestRepository);
+
+    Resident resident = persistResident(residentRepository, "Juan", "Cruz");
+    int existingId = submitPendingRequest(db, resident.getId().value());
+
+    ServiceRequestStatusResult result = service.changeStatus(999, "In Progress");
+
+    CHECK(!result.success);
+    CHECK(result.notFound);
+    CHECK(!result.serviceRequest.has_value());
+    CHECK(!requestRepository.findById(999).has_value());
+    CHECK(countServiceRequestsInDatabase(path) == 1);
+    CHECK(requestRepository.findById(existingId)->getStatus() == ServiceRequestStatus::Pending);
+}
+
+// T10 Required Test 11: Successful transition preserves Service Request information
+DROGON_TEST(SuccessfulTransitionPreservesServiceRequestInformationTest)
+{
+    std::string path = makeTempDbPath("sr_status_preserves_info");
+    Database db(path);
+    ResidentRepository residentRepository(db);
+    ServiceRequestRepository requestRepository(db);
+    ServiceRequestStatusService service(requestRepository);
+
+    Resident resident = persistResident(residentRepository, "Juan", "Cruz");
+    int id = submitPendingRequest(db, resident.getId().value());
+    ServiceRequest before = requestRepository.findById(id).value();
+
+    ServiceRequestStatusResult result = service.changeStatus(id, "In Progress");
+    REQUIRE(result.success);
+
+    ServiceRequest returned = result.serviceRequest.value();
+    ServiceRequest persisted = requestRepository.findById(id).value();
+
+    for (const ServiceRequest &after : {returned, persisted})
+    {
+        CHECK(after.getId() == before.getId());
+        CHECK(after.getResidentId() == before.getResidentId());
+        CHECK(after.getServiceType() == before.getServiceType());
+        CHECK(after.getDescription() == before.getDescription());
+        CHECK(after.getDateRequested() == before.getDateRequested());
+        CHECK(after.getStatus() == ServiceRequestStatus::InProgress);
+    }
+
+    // No second request was created by the update.
+    CHECK(countServiceRequestsInDatabase(path) == 1);
+}
+
+// T10 Required Test 12: Invalid transition does not modify persistence
+DROGON_TEST(InvalidTransitionDoesNotModifyPersistenceTest)
+{
+    std::string path = makeTempDbPath("sr_status_invalid_no_change");
+    Database db(path);
+    ResidentRepository residentRepository(db);
+    ServiceRequestRepository requestRepository(db);
+    ServiceRequestStatusService service(requestRepository);
+
+    Resident resident = persistResident(residentRepository, "Juan", "Cruz");
+    int id = submitPendingRequest(db, resident.getId().value());
+    ServiceRequest before = requestRepository.findById(id).value();
+
+    ServiceRequestStatusResult result = service.changeStatus(id, "Completed");
+    REQUIRE(!result.success);
+
+    ServiceRequest after = requestRepository.findById(id).value();
+
+    CHECK(after.getId() == before.getId());
+    CHECK(after.getResidentId() == before.getResidentId());
+    CHECK(after.getServiceType() == before.getServiceType());
+    CHECK(after.getDescription() == before.getDescription());
+    CHECK(after.getDateRequested() == before.getDateRequested());
+    CHECK(after.getStatus() == before.getStatus());
+    CHECK(after.getStatus() == ServiceRequestStatus::Pending);
+    CHECK(countServiceRequestsInDatabase(path) == 1);
+}
+
+// T10 Required Test 13: Same-status request is rejected
+DROGON_TEST(SameStatusRequestIsRejectedTest)
+{
+    std::string path = makeTempDbPath("sr_status_same_status");
+    Database db(path);
+    ResidentRepository residentRepository(db);
+    ServiceRequestRepository requestRepository(db);
+    ServiceRequestStatusService service(requestRepository);
+
+    Resident resident = persistResident(residentRepository, "Juan", "Cruz");
+    int id = submitPendingRequest(db, resident.getId().value());
+
+    // Pending -> Pending
+    ServiceRequestStatusResult pendingAgain = service.changeStatus(id, "Pending");
+    CHECK(!pendingAgain.success);
+    CHECK(pendingAgain.invalidTransition);
+    CHECK(readStatusFromDatabase(path, id) == "Pending");
+
+    // In Progress -> In Progress
+    REQUIRE(service.changeStatus(id, "In Progress").success);
+    ServiceRequestStatusResult inProgressAgain = service.changeStatus(id, "In Progress");
+    CHECK(!inProgressAgain.success);
+    CHECK(inProgressAgain.invalidTransition);
+    CHECK(readStatusFromDatabase(path, id) == "In Progress");
+
+    // Completed -> Completed
+    REQUIRE(service.changeStatus(id, "Completed").success);
+    ServiceRequestStatusResult completedAgain = service.changeStatus(id, "Completed");
+    CHECK(!completedAgain.success);
+    CHECK(completedAgain.invalidTransition);
+    CHECK(readStatusFromDatabase(path, id) == "Completed");
+}
+
+// T10 Student-Designed Test: changing one request never touches another.
+// Three requests are persisted. One is moved through the whole
+// Pending -> In Progress -> Completed lifecycle, another is cancelled, and
+// the middle one must remain exactly as submitted. This proves the UPDATE
+// targets only the intended id, that sequential valid transitions work, and
+// that each request keeps its own status and information.
+DROGON_TEST(StatusChangeAffectsOnlyTheTargetedServiceRequestTest)
+{
+    std::string path = makeTempDbPath("sr_status_isolation");
+    Database db(path);
+    ResidentRepository residentRepository(db);
+    ServiceRequestRepository requestRepository(db);
+    ServiceRequestStatusService service(requestRepository);
+
+    Resident juan = persistResident(residentRepository, "Juan", "Cruz");
+    Resident maria = persistResident(residentRepository, "Maria", "Santos");
+    int firstId = submitPendingRequest(db, juan.getId().value());
+    int secondId = submitPendingRequest(db, maria.getId().value());
+    int thirdId = submitPendingRequest(db, juan.getId().value());
+    REQUIRE(firstId != secondId);
+
+    ServiceRequest secondBefore = requestRepository.findById(secondId).value();
+
+    // Whole lifecycle for the first request.
+    CHECK(service.changeStatus(firstId, "In Progress").success);
+    CHECK(readStatusFromDatabase(path, firstId) == "In Progress");
+    CHECK(readStatusFromDatabase(path, secondId) == "Pending");
+    CHECK(service.changeStatus(firstId, "Completed").success);
+
+    // A different transition for the third request.
+    CHECK(service.changeStatus(thirdId, "Cancelled").success);
+
+    CHECK(readStatusFromDatabase(path, firstId) == "Completed");
+    CHECK(readStatusFromDatabase(path, thirdId) == "Cancelled");
+
+    // The second request is completely untouched.
+    ServiceRequest secondAfter = requestRepository.findById(secondId).value();
+    CHECK(secondAfter.getId() == secondBefore.getId());
+    CHECK(secondAfter.getResidentId() == maria.getId().value());
+    CHECK(secondAfter.getServiceType() == secondBefore.getServiceType());
+    CHECK(secondAfter.getDescription() == secondBefore.getDescription());
+    CHECK(secondAfter.getDateRequested() == secondBefore.getDateRequested());
+    CHECK(secondAfter.getStatus() == ServiceRequestStatus::Pending);
+    CHECK(countServiceRequestsInDatabase(path) == 3);
+}
+
+// Additional T10 coverage: an existing request keeps moving through its
+// workflow after its Resident is deactivated (T09 only guards NEW requests),
+// and the Resident record is not modified by status management.
+DROGON_TEST(ExistingRequestCanProgressAfterResidentDeactivatedTest)
+{
+    Database db(makeTempDbPath("sr_status_inactive_resident"));
+    ResidentRepository residentRepository(db);
+    ServiceRequestRepository requestRepository(db);
+    ServiceRequestStatusService service(requestRepository);
+    ResidentDeactivationService deactivation(residentRepository);
+
+    Resident resident = persistResident(residentRepository, "Juan", "Cruz");
+    int id = submitPendingRequest(db, resident.getId().value());
+
+    REQUIRE(deactivation.deactivateResident(resident.getId().value()).success);
+
+    CHECK(service.changeStatus(id, "In Progress").success);
+    CHECK(service.changeStatus(id, "Completed").success);
+    CHECK(requestRepository.findById(id)->getStatus() == ServiceRequestStatus::Completed);
+    CHECK(residentRepository.findById(resident.getId().value())->getStatus() == ResidentStatus::Inactive);
+
+    // T09 still blocks NEW requests for the Inactive Resident.
+    ServiceRequestValidator validator;
+    ServiceRequestSubmissionService submission(validator, residentRepository, requestRepository);
+    CHECK(submission.submitServiceRequest(makeValidServiceRequest(resident.getId().value())).residentInactive);
+}
+
+// Additional T10 coverage: a status change is durable — a brand new
+// Database connection and repository still see it.
+DROGON_TEST(StatusChangePersistsAcrossRepositoryInstancesTest)
+{
+    std::string path = makeTempDbPath("sr_status_durable");
+    int id = 0;
+
+    {
+        Database db(path);
+        ResidentRepository residentRepository(db);
+        ServiceRequestRepository requestRepository(db);
+        ServiceRequestStatusService service(requestRepository);
+
+        Resident resident = persistResident(residentRepository, "Juan", "Cruz");
+        id = submitPendingRequest(db, resident.getId().value());
+        REQUIRE(service.changeStatus(id, "In Progress").success);
+    }
+
+    Database reopened(path);
+    ServiceRequestRepository reopenedRepository(reopened);
+    ServiceRequestStatusService reopenedService(reopenedRepository);
+
+    CHECK(reopenedRepository.findById(id)->getStatus() == ServiceRequestStatus::InProgress);
+    CHECK(reopenedService.changeStatus(id, "Completed").success);
+}
+
+// Additional T10 coverage: only the exact supported spellings are accepted.
+DROGON_TEST(StatusTextMustMatchSupportedValuesExactlyTest)
+{
+    std::string path = makeTempDbPath("sr_status_exact_text");
+    Database db(path);
+    ResidentRepository residentRepository(db);
+    ServiceRequestRepository requestRepository(db);
+    ServiceRequestStatusService service(requestRepository);
+
+    Resident resident = persistResident(residentRepository, "Juan", "Cruz");
+    int id = submitPendingRequest(db, resident.getId().value());
+
+    for (const std::string &bad : {"", "in progress", "InProgress", "Processing", "Done", "Closed", "On Hold"})
+    {
+        ServiceRequestStatusResult result = service.changeStatus(id, bad);
+        CHECK(!result.success);
+        CHECK(result.unsupportedStatus);
+    }
+
+    CHECK(readStatusFromDatabase(path, id) == "Pending");
+}
+
+// Additional T10 coverage: the repository update only reports success for an
+// id that exists and never inserts a row.
+DROGON_TEST(RepositoryUpdateStatusIgnoresUnknownIdTest)
+{
+    std::string path = makeTempDbPath("sr_status_repo_unknown");
+    Database db(path);
+    ServiceRequestRepository requestRepository(db);
+
+    CHECK(!requestRepository.updateStatus(42, ServiceRequestStatus::Completed));
+    CHECK(countServiceRequestsInDatabase(path) == 0);
+}
+
+// Keeping the original starter test so existing behavior is preserved.
 DROGON_TEST(BasicTest)
 {
     // Add your tests here
