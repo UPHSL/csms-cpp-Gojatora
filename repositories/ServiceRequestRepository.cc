@@ -89,6 +89,39 @@ std::optional<ServiceRequest> ServiceRequestRepository::findById(int serviceRequ
                           statusFromString(statusText));
 }
 
+bool ServiceRequestRepository::updateStatus(int serviceRequestId, ServiceRequestStatus newStatus)
+{
+    // Only the status column is touched, and only the row with this id.
+    const char *sql = "UPDATE service_requests SET status = ? WHERE id = ?;";
+
+    sqlite3_stmt *statement = nullptr;
+    int prepareResult = sqlite3_prepare_v2(database_.handle(), sql, -1, &statement, nullptr);
+
+    if (prepareResult != SQLITE_OK)
+    {
+        throw std::runtime_error("Failed to prepare service request status UPDATE: " +
+                                  std::string(sqlite3_errmsg(database_.handle())));
+    }
+
+    sqlite3_bind_text(statement, 1, serviceRequestStatusToString(newStatus).c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(statement, 2, serviceRequestId);
+
+    int stepResult = sqlite3_step(statement);
+
+    if (stepResult != SQLITE_DONE)
+    {
+        std::string errorMessage = sqlite3_errmsg(database_.handle());
+        sqlite3_finalize(statement);
+        throw std::runtime_error("Failed to update Service Request status: " + errorMessage);
+    }
+
+    sqlite3_finalize(statement);
+
+    // sqlite3_changes() counts the rows the UPDATE matched; 0 means the id
+    // does not exist.
+    return sqlite3_changes(database_.handle()) == 1;
+}
+
 ServiceRequestStatus ServiceRequestRepository::statusFromString(const std::string &value) const
 {
     if (value == "In Progress")
