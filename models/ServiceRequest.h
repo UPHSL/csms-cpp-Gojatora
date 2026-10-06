@@ -5,7 +5,8 @@
 
 // The lifecycle states of a Service Request. These are only names so a
 // status can be represented and stored; the rules for moving between them
-// (transitions) belong to a later ticket. A NEW request must be Pending.
+// (transitions) live in ServiceRequestStatusService. A NEW request must be
+// Pending.
 enum class ServiceRequestStatus
 {
     Pending,
@@ -16,6 +17,11 @@ enum class ServiceRequestStatus
 
 // Converts a ServiceRequestStatus into the text stored in the database.
 std::string serviceRequestStatusToString(ServiceRequestStatus status);
+
+// Converts text into a ServiceRequestStatus. Only the exact values
+// "Pending", "In Progress", "Completed" and "Cancelled" are supported;
+// anything else (e.g. "Approved", "pending", "") returns std::nullopt.
+std::optional<ServiceRequestStatus> serviceRequestStatusFromString(const std::string &value);
 
 // Represents Service Request information only. It does not validate,
 // persist, submit, or check that the Resident exists (later tickets).

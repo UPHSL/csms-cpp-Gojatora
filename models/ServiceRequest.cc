@@ -17,6 +17,31 @@ std::string serviceRequestStatusToString(ServiceRequestStatus status)
     }
 }
 
+std::optional<ServiceRequestStatus> serviceRequestStatusFromString(const std::string &value)
+{
+    if (value == "Pending")
+    {
+        return ServiceRequestStatus::Pending;
+    }
+
+    if (value == "In Progress")
+    {
+        return ServiceRequestStatus::InProgress;
+    }
+
+    if (value == "Completed")
+    {
+        return ServiceRequestStatus::Completed;
+    }
+
+    if (value == "Cancelled")
+    {
+        return ServiceRequestStatus::Cancelled;
+    }
+
+    return std::nullopt;
+}
+
 ServiceRequest::ServiceRequest(int id,
                                int residentId,
                                const std::string &serviceType,

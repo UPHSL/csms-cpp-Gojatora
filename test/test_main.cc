@@ -17,6 +17,7 @@
 #include "../services/ResidentUpdateService.h"
 #include "../services/ResidentDeactivationService.h"
 #include "../services/ServiceRequestSubmissionService.h"
+#include "../services/ServiceRequestStatusService.h"
 
 #include <sqlite3.h>
 #include <filesystem>
@@ -1708,6 +1709,505 @@ DROGON_TEST(InactiveResidentRemainsSearchableAfterRejectedSubmissionTest)
     std::vector<Resident> results = searchService.searchResidents("Juan");
     CHECK(results.size() == 1);
     CHECK(results[0].getStatus() == ResidentStatus::Inactive);
+}
+
+// ===========================================================================
+// T10: Manage Service Request Status
+// ===========================================================================
+
+// Reads the status column straight from SQLite, bypassing our repository, so
+// tests prove what is REALLY persisted.
+std::string readStatusFromDatabase(const std::string &databasePath, int serviceRequestId)
+{
+    sqlite3 *database = nullptr;
+    sqlite3_open(databasePath.c_str(), &database);
+
+    sqlite3_stmt *statement = nullptr;
+    sqlite3_prepare_v2(database, "SELECT status FROM service_requests WHERE id = ?", -1, &statement, nullptr);
+    sqlite3_bind_int(statement, 1, serviceRequestId);
+
+    std::string status = "(no row)";
+    if (sqlite3_step(statement) == SQLITE_ROW)
+    {
+        status = reinterpret_cast<const char *>(sqlite3_column_text(statement, 0));
+    }
+
+    sqlite3_finalize(statement);
+    sqlite3_close(database);
+
+    return status;
+}
+
+// Submits a valid request through the real T09 service so every T10 test
+// starts from a genuinely persisted Pending request. Returns its id.
+int submitPendingRequest(Database &db, int residentId)
+{
+    ResidentRepository residentRepository(db);
+    ServiceRequestRepository requestRepository(db);
+    ServiceRequestValidator validator;
+    ServiceRequestSubmissionService submission(validator, residentRepository, requestRepository);
+
+    ServiceRequestSubmissionResult result = submission.submitServiceRequest(makeValidServiceRequest(residentId));
+    return result.serviceRequest->getId().value();
+}
+
+// T10 Required Test 1: Pending can move to In Progress
+DROGON_TEST(PendingCanMoveToInProgressTest)
+{
+    std::string path = makeTempDbPath("sr_status_pending_to_inprogress");
+    Database db(path);
+    ResidentRepository residentRepository(db);
+    ServiceRequestRepository requestRepository(db);
+    ServiceRequestStatusService service(requestRepository);
+
+    Resident resident = persistResident(residentRepository, "Juan", "Cruz");
+    int id = submitPendingRequest(db, resident.getId().value());
+
+    ServiceRequestStatusResult result = service.changeStatus(id, "In Progress");
+
+    CHECK(result.success);
+    CHECK(!result.notFound);
+    CHECK(!result.unsupportedStatus);
+    CHECK(!result.invalidTransition);
+    CHECK(result.serviceRequest.has_value());
+    CHECK(result.serviceRequest->getStatus() == ServiceRequestStatus::InProgress);
+    CHECK(requestRepository.findById(id)->getStatus() == ServiceRequestStatus::InProgress);
+    CHECK(readStatusFromDatabase(path, id) == "In Progress");
+}
+
+// T10 Required Test 2: Pending can move to Cancelled
+DROGON_TEST(PendingCanMoveToCancelledTest)
+{
+    std::string path = makeTempDbPath("sr_status_pending_to_cancelled");
+    Database db(path);
+    ResidentRepository residentRepository(db);
+    ServiceRequestRepository requestRepository(db);
+    ServiceRequestStatusService service(requestRepository);
+
+    Resident resident = persistResident(residentRepository, "Juan", "Cruz");
+    int id = submitPendingRequest(db, resident.getId().value());
+
+    ServiceRequestStatusResult result = service.changeStatus(id, "Cancelled");
+
+    CHECK(result.success);
+    CHECK(result.serviceRequest->getStatus() == ServiceRequestStatus::Cancelled);
+    CHECK(readStatusFromDatabase(path, id) == "Cancelled");
+}
+
+// T10 Required Test 3: In Progress can move to Completed
+// The In Progress state is reached through the real workflow, not by
+// hand-writing a database row.
+DROGON_TEST(InProgressCanMoveToCompletedTest)
+{
+    std::string path = makeTempDbPath("sr_status_inprogress_to_completed");
+    Database db(path);
+    ResidentRepository residentRepository(db);
+    ServiceRequestRepository requestRepository(db);
+    ServiceRequestStatusService service(requestRepository);
+
+    Resident resident = persistResident(residentRepository, "Juan", "Cruz");
+    int id = submitPendingRequest(db, resident.getId().value());
+
+    REQUIRE(service.changeStatus(id, "In Progress").success);
+
+    ServiceRequestStatusResult result = service.changeStatus(id, "Completed");
+
+    CHECK(result.success);
+    CHECK(result.serviceRequest->getStatus() == ServiceRequestStatus::Completed);
+    CHECK(readStatusFromDatabase(path, id) == "Completed");
+}
+
+// T10 Required Test 4: In Progress can move to Cancelled
+DROGON_TEST(InProgressCanMoveToCancelledTest)
+{
+    std::string path = makeTempDbPath("sr_status_inprogress_to_cancelled");
+    Database db(path);
+    ResidentRepository residentRepository(db);
+    ServiceRequestRepository requestRepository(db);
+    ServiceRequestStatusService service(requestRepository);
+
+    Resident resident = persistResident(residentRepository, "Juan", "Cruz");
+    int id = submitPendingRequest(db, resident.getId().value());
+
+    REQUIRE(service.changeStatus(id, "In Progress").success);
+
+    ServiceRequestStatusResult result = service.changeStatus(id, "Cancelled");
+
+    CHECK(result.success);
+    CHECK(result.serviceRequest->getStatus() == ServiceRequestStatus::Cancelled);
+    CHECK(readStatusFromDatabase(path, id) == "Cancelled");
+}
+
+// T10 Required Test 5: Pending cannot move directly to Completed
+DROGON_TEST(PendingCannotMoveDirectlyToCompletedTest)
+{
+    std::string path = makeTempDbPath("sr_status_pending_to_completed");
+    Database db(path);
+    ResidentRepository residentRepository(db);
+    ServiceRequestRepository requestRepository(db);
+    ServiceRequestStatusService service(requestRepository);
+
+    Resident resident = persistResident(residentRepository, "Juan", "Cruz");
+    int id = submitPendingRequest(db, resident.getId().value());
+
+    ServiceRequestStatusResult result = service.changeStatus(id, "Completed");
+
+    CHECK(!result.success);
+    CHECK(result.invalidTransition);
+    CHECK(!result.serviceRequest.has_value());
+    CHECK(requestRepository.findById(id)->getStatus() == ServiceRequestStatus::Pending);
+    CHECK(readStatusFromDatabase(path, id) == "Pending");
+}
+
+// T10 Required Test 6: In Progress cannot return to Pending
+DROGON_TEST(InProgressCannotReturnToPendingTest)
+{
+    std::string path = makeTempDbPath("sr_status_inprogress_to_pending");
+    Database db(path);
+    ResidentRepository residentRepository(db);
+    ServiceRequestRepository requestRepository(db);
+    ServiceRequestStatusService service(requestRepository);
+
+    Resident resident = persistResident(residentRepository, "Juan", "Cruz");
+    int id = submitPendingRequest(db, resident.getId().value());
+
+    REQUIRE(service.changeStatus(id, "In Progress").success);
+
+    ServiceRequestStatusResult result = service.changeStatus(id, "Pending");
+
+    CHECK(!result.success);
+    CHECK(result.invalidTransition);
+    CHECK(requestRepository.findById(id)->getStatus() == ServiceRequestStatus::InProgress);
+    CHECK(readStatusFromDatabase(path, id) == "In Progress");
+}
+
+// T10 Required Test 7: Completed is terminal
+DROGON_TEST(CompletedIsTerminalTest)
+{
+    std::string path = makeTempDbPath("sr_status_completed_terminal");
+    Database db(path);
+    ResidentRepository residentRepository(db);
+    ServiceRequestRepository requestRepository(db);
+    ServiceRequestStatusService service(requestRepository);
+
+    Resident resident = persistResident(residentRepository, "Juan", "Cruz");
+    int id = submitPendingRequest(db, resident.getId().value());
+
+    REQUIRE(service.changeStatus(id, "In Progress").success);
+    REQUIRE(service.changeStatus(id, "Completed").success);
+
+    ServiceRequestStatusResult toPending = service.changeStatus(id, "Pending");
+    ServiceRequestStatusResult toInProgress = service.changeStatus(id, "In Progress");
+    ServiceRequestStatusResult toCancelled = service.changeStatus(id, "Cancelled");
+
+    CHECK(!toPending.success);
+    CHECK(toPending.invalidTransition);
+    CHECK(!toInProgress.success);
+    CHECK(toInProgress.invalidTransition);
+    CHECK(!toCancelled.success);
+    CHECK(toCancelled.invalidTransition);
+    CHECK(requestRepository.findById(id)->getStatus() == ServiceRequestStatus::Completed);
+    CHECK(readStatusFromDatabase(path, id) == "Completed");
+}
+
+// T10 Required Test 8: Cancelled is terminal
+DROGON_TEST(CancelledIsTerminalTest)
+{
+    std::string path = makeTempDbPath("sr_status_cancelled_terminal");
+    Database db(path);
+    ResidentRepository residentRepository(db);
+    ServiceRequestRepository requestRepository(db);
+    ServiceRequestStatusService service(requestRepository);
+
+    Resident resident = persistResident(residentRepository, "Juan", "Cruz");
+    int id = submitPendingRequest(db, resident.getId().value());
+
+    REQUIRE(service.changeStatus(id, "Cancelled").success);
+
+    ServiceRequestStatusResult toPending = service.changeStatus(id, "Pending");
+    ServiceRequestStatusResult toInProgress = service.changeStatus(id, "In Progress");
+    ServiceRequestStatusResult toCompleted = service.changeStatus(id, "Completed");
+
+    CHECK(!toPending.success);
+    CHECK(toPending.invalidTransition);
+    CHECK(!toInProgress.success);
+    CHECK(toInProgress.invalidTransition);
+    CHECK(!toCompleted.success);
+    CHECK(toCompleted.invalidTransition);
+    CHECK(requestRepository.findById(id)->getStatus() == ServiceRequestStatus::Cancelled);
+    CHECK(readStatusFromDatabase(path, id) == "Cancelled");
+}
+
+// T10 Required Test 9: Unsupported status is rejected
+DROGON_TEST(UnsupportedStatusIsRejectedTest)
+{
+    std::string path = makeTempDbPath("sr_status_unsupported");
+    Database db(path);
+    ResidentRepository residentRepository(db);
+    ServiceRequestRepository requestRepository(db);
+    ServiceRequestStatusService service(requestRepository);
+
+    Resident resident = persistResident(residentRepository, "Juan", "Cruz");
+    int id = submitPendingRequest(db, resident.getId().value());
+
+    ServiceRequestStatusResult result = service.changeStatus(id, "Approved");
+
+    CHECK(!result.success);
+    CHECK(result.unsupportedStatus);
+    CHECK(!result.invalidTransition);
+    CHECK(!result.notFound);
+    CHECK(!result.serviceRequest.has_value());
+    CHECK(requestRepository.findById(id)->getStatus() == ServiceRequestStatus::Pending);
+    CHECK(readStatusFromDatabase(path, id) == "Pending");
+}
+
+// T10 Required Test 10: Nonexistent Service Request is handled safely
+DROGON_TEST(NonexistentServiceRequestIsHandledSafelyTest)
+{
+    std::string path = makeTempDbPath("sr_status_not_found");
+    Database db(path);
+    ResidentRepository residentRepository(db);
+    ServiceRequestRepository requestRepository(db);
+    ServiceRequestStatusService service(requestRepository);
+
+    Resident resident = persistResident(residentRepository, "Juan", "Cruz");
+    int existingId = submitPendingRequest(db, resident.getId().value());
+
+    ServiceRequestStatusResult result = service.changeStatus(999, "In Progress");
+
+    CHECK(!result.success);
+    CHECK(result.notFound);
+    CHECK(!result.serviceRequest.has_value());
+    CHECK(!requestRepository.findById(999).has_value());
+    CHECK(countServiceRequestsInDatabase(path) == 1);
+    CHECK(requestRepository.findById(existingId)->getStatus() == ServiceRequestStatus::Pending);
+}
+
+// T10 Required Test 11: Successful transition preserves Service Request information
+DROGON_TEST(SuccessfulTransitionPreservesServiceRequestInformationTest)
+{
+    std::string path = makeTempDbPath("sr_status_preserves_info");
+    Database db(path);
+    ResidentRepository residentRepository(db);
+    ServiceRequestRepository requestRepository(db);
+    ServiceRequestStatusService service(requestRepository);
+
+    Resident resident = persistResident(residentRepository, "Juan", "Cruz");
+    int id = submitPendingRequest(db, resident.getId().value());
+    ServiceRequest before = requestRepository.findById(id).value();
+
+    ServiceRequestStatusResult result = service.changeStatus(id, "In Progress");
+    REQUIRE(result.success);
+
+    ServiceRequest returned = result.serviceRequest.value();
+    ServiceRequest persisted = requestRepository.findById(id).value();
+
+    for (const ServiceRequest &after : {returned, persisted})
+    {
+        CHECK(after.getId() == before.getId());
+        CHECK(after.getResidentId() == before.getResidentId());
+        CHECK(after.getServiceType() == before.getServiceType());
+        CHECK(after.getDescription() == before.getDescription());
+        CHECK(after.getDateRequested() == before.getDateRequested());
+        CHECK(after.getStatus() == ServiceRequestStatus::InProgress);
+    }
+
+    // No second request was created by the update.
+    CHECK(countServiceRequestsInDatabase(path) == 1);
+}
+
+// T10 Required Test 12: Invalid transition does not modify persistence
+DROGON_TEST(InvalidTransitionDoesNotModifyPersistenceTest)
+{
+    std::string path = makeTempDbPath("sr_status_invalid_no_change");
+    Database db(path);
+    ResidentRepository residentRepository(db);
+    ServiceRequestRepository requestRepository(db);
+    ServiceRequestStatusService service(requestRepository);
+
+    Resident resident = persistResident(residentRepository, "Juan", "Cruz");
+    int id = submitPendingRequest(db, resident.getId().value());
+    ServiceRequest before = requestRepository.findById(id).value();
+
+    ServiceRequestStatusResult result = service.changeStatus(id, "Completed");
+    REQUIRE(!result.success);
+
+    ServiceRequest after = requestRepository.findById(id).value();
+
+    CHECK(after.getId() == before.getId());
+    CHECK(after.getResidentId() == before.getResidentId());
+    CHECK(after.getServiceType() == before.getServiceType());
+    CHECK(after.getDescription() == before.getDescription());
+    CHECK(after.getDateRequested() == before.getDateRequested());
+    CHECK(after.getStatus() == before.getStatus());
+    CHECK(after.getStatus() == ServiceRequestStatus::Pending);
+    CHECK(countServiceRequestsInDatabase(path) == 1);
+}
+
+// T10 Required Test 13: Same-status request is rejected
+DROGON_TEST(SameStatusRequestIsRejectedTest)
+{
+    std::string path = makeTempDbPath("sr_status_same_status");
+    Database db(path);
+    ResidentRepository residentRepository(db);
+    ServiceRequestRepository requestRepository(db);
+    ServiceRequestStatusService service(requestRepository);
+
+    Resident resident = persistResident(residentRepository, "Juan", "Cruz");
+    int id = submitPendingRequest(db, resident.getId().value());
+
+    // Pending -> Pending
+    ServiceRequestStatusResult pendingAgain = service.changeStatus(id, "Pending");
+    CHECK(!pendingAgain.success);
+    CHECK(pendingAgain.invalidTransition);
+    CHECK(readStatusFromDatabase(path, id) == "Pending");
+
+    // In Progress -> In Progress
+    REQUIRE(service.changeStatus(id, "In Progress").success);
+    ServiceRequestStatusResult inProgressAgain = service.changeStatus(id, "In Progress");
+    CHECK(!inProgressAgain.success);
+    CHECK(inProgressAgain.invalidTransition);
+    CHECK(readStatusFromDatabase(path, id) == "In Progress");
+
+    // Completed -> Completed
+    REQUIRE(service.changeStatus(id, "Completed").success);
+    ServiceRequestStatusResult completedAgain = service.changeStatus(id, "Completed");
+    CHECK(!completedAgain.success);
+    CHECK(completedAgain.invalidTransition);
+    CHECK(readStatusFromDatabase(path, id) == "Completed");
+}
+
+// T10 Student-Designed Test: changing one request never touches another.
+// Three requests are persisted. One is moved through the whole
+// Pending -> In Progress -> Completed lifecycle, another is cancelled, and
+// the middle one must remain exactly as submitted. This proves the UPDATE
+// targets only the intended id, that sequential valid transitions work, and
+// that each request keeps its own status and information.
+DROGON_TEST(StatusChangeAffectsOnlyTheTargetedServiceRequestTest)
+{
+    std::string path = makeTempDbPath("sr_status_isolation");
+    Database db(path);
+    ResidentRepository residentRepository(db);
+    ServiceRequestRepository requestRepository(db);
+    ServiceRequestStatusService service(requestRepository);
+
+    Resident juan = persistResident(residentRepository, "Juan", "Cruz");
+    Resident maria = persistResident(residentRepository, "Maria", "Santos");
+    int firstId = submitPendingRequest(db, juan.getId().value());
+    int secondId = submitPendingRequest(db, maria.getId().value());
+    int thirdId = submitPendingRequest(db, juan.getId().value());
+    REQUIRE(firstId != secondId);
+
+    ServiceRequest secondBefore = requestRepository.findById(secondId).value();
+
+    // Whole lifecycle for the first request.
+    CHECK(service.changeStatus(firstId, "In Progress").success);
+    CHECK(readStatusFromDatabase(path, firstId) == "In Progress");
+    CHECK(readStatusFromDatabase(path, secondId) == "Pending");
+    CHECK(service.changeStatus(firstId, "Completed").success);
+
+    // A different transition for the third request.
+    CHECK(service.changeStatus(thirdId, "Cancelled").success);
+
+    CHECK(readStatusFromDatabase(path, firstId) == "Completed");
+    CHECK(readStatusFromDatabase(path, thirdId) == "Cancelled");
+
+    // The second request is completely untouched.
+    ServiceRequest secondAfter = requestRepository.findById(secondId).value();
+    CHECK(secondAfter.getId() == secondBefore.getId());
+    CHECK(secondAfter.getResidentId() == maria.getId().value());
+    CHECK(secondAfter.getServiceType() == secondBefore.getServiceType());
+    CHECK(secondAfter.getDescription() == secondBefore.getDescription());
+    CHECK(secondAfter.getDateRequested() == secondBefore.getDateRequested());
+    CHECK(secondAfter.getStatus() == ServiceRequestStatus::Pending);
+    CHECK(countServiceRequestsInDatabase(path) == 3);
+}
+
+// Additional T10 coverage: an existing request keeps moving through its
+// workflow after its Resident is deactivated (T09 only guards NEW requests),
+// and the Resident record is not modified by status management.
+DROGON_TEST(ExistingRequestCanProgressAfterResidentDeactivatedTest)
+{
+    Database db(makeTempDbPath("sr_status_inactive_resident"));
+    ResidentRepository residentRepository(db);
+    ServiceRequestRepository requestRepository(db);
+    ServiceRequestStatusService service(requestRepository);
+    ResidentDeactivationService deactivation(residentRepository);
+
+    Resident resident = persistResident(residentRepository, "Juan", "Cruz");
+    int id = submitPendingRequest(db, resident.getId().value());
+
+    REQUIRE(deactivation.deactivateResident(resident.getId().value()).success);
+
+    CHECK(service.changeStatus(id, "In Progress").success);
+    CHECK(service.changeStatus(id, "Completed").success);
+    CHECK(requestRepository.findById(id)->getStatus() == ServiceRequestStatus::Completed);
+    CHECK(residentRepository.findById(resident.getId().value())->getStatus() == ResidentStatus::Inactive);
+
+    // T09 still blocks NEW requests for the Inactive Resident.
+    ServiceRequestValidator validator;
+    ServiceRequestSubmissionService submission(validator, residentRepository, requestRepository);
+    CHECK(submission.submitServiceRequest(makeValidServiceRequest(resident.getId().value())).residentInactive);
+}
+
+// Additional T10 coverage: a status change is durable — a brand new
+// Database connection and repository still see it.
+DROGON_TEST(StatusChangePersistsAcrossRepositoryInstancesTest)
+{
+    std::string path = makeTempDbPath("sr_status_durable");
+    int id = 0;
+
+    {
+        Database db(path);
+        ResidentRepository residentRepository(db);
+        ServiceRequestRepository requestRepository(db);
+        ServiceRequestStatusService service(requestRepository);
+
+        Resident resident = persistResident(residentRepository, "Juan", "Cruz");
+        id = submitPendingRequest(db, resident.getId().value());
+        REQUIRE(service.changeStatus(id, "In Progress").success);
+    }
+
+    Database reopened(path);
+    ServiceRequestRepository reopenedRepository(reopened);
+    ServiceRequestStatusService reopenedService(reopenedRepository);
+
+    CHECK(reopenedRepository.findById(id)->getStatus() == ServiceRequestStatus::InProgress);
+    CHECK(reopenedService.changeStatus(id, "Completed").success);
+}
+
+// Additional T10 coverage: only the exact supported spellings are accepted.
+DROGON_TEST(StatusTextMustMatchSupportedValuesExactlyTest)
+{
+    std::string path = makeTempDbPath("sr_status_exact_text");
+    Database db(path);
+    ResidentRepository residentRepository(db);
+    ServiceRequestRepository requestRepository(db);
+    ServiceRequestStatusService service(requestRepository);
+
+    Resident resident = persistResident(residentRepository, "Juan", "Cruz");
+    int id = submitPendingRequest(db, resident.getId().value());
+
+    for (const std::string &bad : {"", "in progress", "InProgress", "Processing", "Done", "Closed", "On Hold"})
+    {
+        ServiceRequestStatusResult result = service.changeStatus(id, bad);
+        CHECK(!result.success);
+        CHECK(result.unsupportedStatus);
+    }
+
+    CHECK(readStatusFromDatabase(path, id) == "Pending");
+}
+
+// Additional T10 coverage: the repository update only reports success for an
+// id that exists and never inserts a row.
+DROGON_TEST(RepositoryUpdateStatusIgnoresUnknownIdTest)
+{
+    std::string path = makeTempDbPath("sr_status_repo_unknown");
+    Database db(path);
+    ServiceRequestRepository requestRepository(db);
+
+    CHECK(!requestRepository.updateStatus(42, ServiceRequestStatus::Completed));
+    CHECK(countServiceRequestsInDatabase(path) == 0);
 }
 
 // Keeping the original starter test so existing behavior is preserved.

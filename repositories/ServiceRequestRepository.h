@@ -22,6 +22,12 @@ public:
     // Returns std::nullopt if no Service Request has this id.
     std::optional<ServiceRequest> findById(int serviceRequestId);
 
+    // Updates ONLY the status column of the row with this id. Returns true
+    // if exactly that one row was updated, false if no row has this id (in
+    // which case nothing is inserted or changed). It applies no transition
+    // rules — ServiceRequestStatusService decides whether a change is allowed.
+    bool updateStatus(int serviceRequestId, ServiceRequestStatus newStatus);
+
 private:
     Database &database_;
 
