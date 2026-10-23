@@ -1,0 +1,79 @@
+<%inc
+#include <map>
+#include "views/ResidentLayout.h"
+%>
+<%c++
+using FieldMap = std::map<std::string, std::string>;
+const auto &pageTitle = @@.get<std::string>("pageTitle");
+const bool editing = @@.get<bool>("editing");
+const auto &action = @@.get<std::string>("action");
+const auto &values = @@.get<FieldMap>("values");
+const auto &errors = @@.get<FieldMap>("errors");
+const auto &residentId = @@.get<std::string>("residentId");
+const auto &status = @@.get<std::string>("status");
+
+auto valueOf = [&](const std::string &name) {
+    auto it = values.find(name);
+    return it == values.end() ? std::string() : it->second;
+};
+auto errorOf = [&](const std::string &name) {
+    auto it = errors.find(name);
+    return it == errors.end() ? std::string() : it->second;
+};
+// Renders one labelled text input plus its validation message, if any.
+auto field = [&](const std::string &name, const std::string &label, const std::string &type) {
+    const std::string error = errorOf(name);
+    $$ << "<div class=\"field\"><label for=\"" << name << "\">" << label << "</label>"
+       << "<input type=\"" << type << "\" id=\"" << name << "\" name=\"" << name
+       << "\" value=\"" << h(valueOf(name)) << "\" required>";
+    if (!error.empty())
+    {
+        $$ << "<div class=\"field-error\">" << h(error) << "</div>";
+    }
+    $$ << "</div>";
+};
+%>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title><%c++ $$ << h(pageTitle); %> - CSMS</title>
+    <style><%c++ $$ << residentPageStyles(); %></style>
+</head>
+<body>
+<main>
+    <h1><%c++ $$ << h(pageTitle); %></h1>
+
+    <%c++ if (!errors.empty()) { %>
+    <div class="message error" role="alert">
+        Please correct the following:
+        <ul>
+        <%c++ for (const auto &entry : errors) { %>
+            <li><%c++ $$ << h(entry.second); %></li>
+        <%c++ } %>
+        </ul>
+    </div>
+    <%c++ } %>
+
+    <%c++ if (editing) { %>
+    <div class="readonly">Resident ID: <span><%c++ $$ << h(residentId); %></span></div>
+    <div class="readonly">Status: <span><%c++ $$ << h(status); %></span></div>
+    <%c++ } %>
+
+    <form method="post" action="<%c++ $$ << h(action); %>">
+        <%c++
+        field("firstName", "First Name", "text");
+        field("lastName", "Last Name", "text");
+        field("address", "Address", "text");
+        field("contactNumber", "Contact Number", "tel");
+        field("email", "Email", "email");
+        %>
+        <div class="form-actions">
+            <button type="submit"><%c++ $$ << (editing ? "Save Changes" : "Register Resident"); %></button>
+            <a class="button secondary" href="/residents">Back to Resident Management</a>
+        </div>
+    </form>
+</main>
+</body>
+</html>

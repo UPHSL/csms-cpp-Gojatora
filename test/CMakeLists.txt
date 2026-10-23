@@ -14,6 +14,8 @@ add_executable(${PROJECT_NAME}
     ../services/ResidentSearchService.cc
     ../services/ResidentUpdateService.cc
     ../services/ResidentDeactivationService.cc
+    ../services/ResidentServices.cc
+    ../controllers/ResidentController.cc
     ../services/ServiceRequestSubmissionService.cc
     ../services/ServiceRequestStatusService.cc
     ../services/ServiceRequestQueryService.cc
@@ -32,3 +34,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE Drogon::Drogon)
 target_link_libraries(${PROJECT_NAME} PRIVATE SQLite3_lib)
 
 ParseAndAddDrogonTests(${PROJECT_NAME})
+# The Resident controller renders the CSP views, so the test executable needs
+# the same generated view classes as the application.
+drogon_create_views(${PROJECT_NAME} ${CMAKE_CURRENT_SOURCE_DIR}/../views
+                    ${CMAKE_CURRENT_BINARY_DIR})

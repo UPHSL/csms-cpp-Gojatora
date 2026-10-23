@@ -108,6 +108,7 @@ void HomeController::asyncHandleHttpRequest(
         </section>
 
         <p class="status">Environment status: Ready</p>
+        <p><a href="/residents">Resident Management</a></p>
     </main>
 </body>
 </html>
