@@ -18,10 +18,13 @@
 #include "../services/ResidentDeactivationService.h"
 #include "../services/ServiceRequestSubmissionService.h"
 #include "../services/ServiceRequestStatusService.h"
+#include "../services/ServiceRequestQueryService.h"
 
 #include <sqlite3.h>
 #include <filesystem>
 #include <cstdio>
+#include <set>
+#include <vector>
 
 // Creates a fresh, uniquely-named temporary SQLite file path for a test.
 // Using a unique name per test (via a counter) avoids tests interfering
@@ -2208,6 +2211,445 @@ DROGON_TEST(RepositoryUpdateStatusIgnoresUnknownIdTest)
 
     CHECK(!requestRepository.updateStatus(42, ServiceRequestStatus::Completed));
     CHECK(countServiceRequestsInDatabase(path) == 0);
+}
+
+// ---------------------------------------------------------------------------
+// T11 - Search and View Service Requests
+// ---------------------------------------------------------------------------
+
+// Persists a Service Request directly through the repository, for setting up
+// query scenarios (bypasses submission/validation on purpose, since T11 is
+// testing read behavior, and lets a test choose date and status freely).
+ServiceRequest saveQueryRequest(ServiceRequestRepository &repository,
+                                const std::string &serviceType,
+                                const std::string &description,
+                                const std::string &dateRequested,
+                                ServiceRequestStatus status = ServiceRequestStatus::Pending,
+                                int residentId = 1)
+{
+    return repository.save(ServiceRequest(residentId, serviceType, description, dateRequested, status));
+}
+
+std::vector<int> idsOf(const std::vector<ServiceRequest> &requests)
+{
+    std::vector<int> ids;
+    for (const ServiceRequest &request : requests)
+    {
+        ids.push_back(request.getId().value());
+    }
+    return ids;
+}
+
+// T11 Required Test 1: List all persisted Service Requests
+DROGON_TEST(ListAllPersistedServiceRequestsTest)
+{
+    Database db(makeTempDbPath("sr_query_list_all"));
+    ServiceRequestRepository repository(db);
+    ServiceRequestQueryService service(repository);
+
+    saveQueryRequest(repository, "Barangay Clearance", "For employment", "2026-09-10");
+    saveQueryRequest(repository, "Community Assistance", "Medical support", "2026-09-11");
+    saveQueryRequest(repository, "Business Permit", "New stall", "2026-09-12");
+
+    CHECK(service.listServiceRequests().size() == 3);
+}
+
+// T11 Required Test 2: Empty listing returns an empty collection
+DROGON_TEST(EmptyServiceRequestListingTest)
+{
+    std::string path = makeTempDbPath("sr_query_list_empty");
+    Database db(path);
+    ServiceRequestRepository repository(db);
+    ServiceRequestQueryService service(repository);
+
+    CHECK(service.listServiceRequests().empty());
+    CHECK(countServiceRequestsInDatabase(path) == 0);
+}
+
+// T11 Required Test 3: Listing uses dateRequested DESC, then id DESC
+DROGON_TEST(ServiceRequestListingUsesRequiredOrderingTest)
+{
+    Database db(makeTempDbPath("sr_query_ordering"));
+    ServiceRequestRepository repository(db);
+    ServiceRequestQueryService service(repository);
+
+    // Inserted in an order that differs from the required result.
+    int id1 = saveQueryRequest(repository, "Type A", "Desc", "2026-09-15").getId().value();
+    int id2 = saveQueryRequest(repository, "Type B", "Desc", "2026-09-18").getId().value();
+    int id3 = saveQueryRequest(repository, "Type C", "Desc", "2026-09-10").getId().value();
+    int id4 = saveQueryRequest(repository, "Type D", "Desc", "2026-09-18").getId().value();
+
+    std::vector<int> expected = {id4, id2, id1, id3}; // 09-18 (higher id first), 09-18, 09-15, 09-10
+    CHECK(idsOf(service.listServiceRequests()) == expected);
+}
+
+// T11 Required Test 4: View an existing Service Request by ID
+DROGON_TEST(ViewExistingServiceRequestTest)
+{
+    Database db(makeTempDbPath("sr_query_view"));
+    ServiceRequestRepository repository(db);
+    ServiceRequestQueryService service(repository);
+
+    saveQueryRequest(repository, "Barangay Clearance", "First", "2026-09-10");
+    ServiceRequest target = saveQueryRequest(repository, "Community Assistance", "Second", "2026-09-11");
+
+    std::optional<ServiceRequest> viewed = service.viewServiceRequest(target.getId().value());
+
+    REQUIRE(viewed.has_value());
+    CHECK(viewed->getId().value() == target.getId().value());
+    CHECK(viewed->getServiceType() == "Community Assistance");
+}
+
+// T11 Required Test 5: Viewing an unknown ID is handled safely
+DROGON_TEST(ViewUnknownServiceRequestIsHandledSafelyTest)
+{
+    std::string path = makeTempDbPath("sr_query_view_unknown");
+    Database db(path);
+    ServiceRequestRepository repository(db);
+    ServiceRequestQueryService service(repository);
+
+    saveQueryRequest(repository, "Barangay Clearance", "Existing", "2026-09-10");
+
+    CHECK(!service.viewServiceRequest(999).has_value());
+    CHECK(!service.viewServiceRequest(0).has_value());
+    CHECK(!service.viewServiceRequest(-5).has_value());
+    CHECK(countServiceRequestsInDatabase(path) == 1); // nothing was created
+}
+
+// T11 Required Test 6: Partial service-type search is case-insensitive
+DROGON_TEST(PartialServiceTypeSearchIsCaseInsensitiveTest)
+{
+    Database db(makeTempDbPath("sr_query_type_search"));
+    ServiceRequestRepository repository(db);
+    ServiceRequestQueryService service(repository);
+
+    int clearanceId = saveQueryRequest(repository, "Barangay Clearance", "Employment", "2026-09-10").getId().value();
+    saveQueryRequest(repository, "Community Assistance", "Medical support", "2026-09-11");
+
+    for (const std::string &term : {"cLeAr", "CLEAR", "clear"})
+    {
+        ServiceRequestQueryResult result = service.searchServiceRequests(term);
+        REQUIRE(result.success);
+        CHECK(idsOf(result.serviceRequests) == std::vector<int>{clearanceId});
+    }
+}
+
+// T11 Required Test 7: Partial description search is case-insensitive
+DROGON_TEST(PartialDescriptionSearchIsCaseInsensitiveTest)
+{
+    Database db(makeTempDbPath("sr_query_description_search"));
+    ServiceRequestRepository repository(db);
+    ServiceRequestQueryService service(repository);
+
+    int targetId = saveQueryRequest(repository, "Barangay Clearance",
+                                    "Requesting barangay clearance for employment requirements.",
+                                    "2026-09-10").getId().value();
+    saveQueryRequest(repository, "Community Assistance", "Medical support", "2026-09-11");
+
+    ServiceRequestQueryResult result = service.searchServiceRequests("EmPlOyMeNt");
+
+    REQUIRE(result.success);
+    CHECK(idsOf(result.serviceRequests) == std::vector<int>{targetId});
+}
+
+// T11 Required Test 8: Blank search returns the same requests as listing
+DROGON_TEST(BlankServiceRequestSearchReturnsAllInListingOrderTest)
+{
+    Database db(makeTempDbPath("sr_query_blank"));
+    ServiceRequestRepository repository(db);
+    ServiceRequestQueryService service(repository);
+
+    saveQueryRequest(repository, "Barangay Clearance", "A", "2026-09-15");
+    saveQueryRequest(repository, "Community Assistance", "B", "2026-09-18");
+    saveQueryRequest(repository, "Business Permit", "C", "2026-09-18", ServiceRequestStatus::Completed);
+
+    std::vector<int> listed = idsOf(service.listServiceRequests());
+    REQUIRE(listed.size() == 3);
+
+    for (const std::string &blank : {"", " ", "      ", "\t \n"})
+    {
+        ServiceRequestQueryResult result = service.searchServiceRequests(blank);
+        REQUIRE(result.success);
+        CHECK(idsOf(result.serviceRequests) == listed);
+    }
+
+    // Omitting both arguments is also a plain listing.
+    CHECK(idsOf(service.searchServiceRequests().serviceRequests) == listed);
+}
+
+// T11 Required Test 9: No text match returns an empty collection
+DROGON_TEST(ServiceRequestSearchWithNoMatchReturnsEmptyCollectionTest)
+{
+    Database db(makeTempDbPath("sr_query_no_match"));
+    ServiceRequestRepository repository(db);
+    ServiceRequestQueryService service(repository);
+
+    saveQueryRequest(repository, "Barangay Clearance", "Employment", "2026-09-10");
+
+    ServiceRequestQueryResult result = service.searchServiceRequests("zzz-not-present");
+
+    CHECK(result.success);
+    CHECK(!result.unsupportedStatus);
+    CHECK(result.serviceRequests.empty());
+}
+
+// T11 Required Test 10: Status filter returns only the matching status
+DROGON_TEST(StatusFilterReturnsOnlyMatchingStatusTest)
+{
+    Database db(makeTempDbPath("sr_query_status_filter"));
+    ServiceRequestRepository repository(db);
+    ServiceRequestQueryService service(repository);
+
+    saveQueryRequest(repository, "Type A", "Desc", "2026-09-10", ServiceRequestStatus::Pending);
+    saveQueryRequest(repository, "Type B", "Desc", "2026-09-11", ServiceRequestStatus::InProgress);
+    saveQueryRequest(repository, "Type C", "Desc", "2026-09-12", ServiceRequestStatus::Pending);
+    saveQueryRequest(repository, "Type D", "Desc", "2026-09-13", ServiceRequestStatus::Completed);
+    saveQueryRequest(repository, "Type E", "Desc", "2026-09-14", ServiceRequestStatus::Cancelled);
+
+    ServiceRequestQueryResult pending = service.searchServiceRequests("", "Pending");
+    REQUIRE(pending.success);
+    CHECK(pending.serviceRequests.size() == 2);
+    for (const ServiceRequest &request : pending.serviceRequests)
+    {
+        CHECK(request.getStatus() == ServiceRequestStatus::Pending);
+    }
+
+    // Each of the other three statuses works as a filter too.
+    CHECK(service.searchServiceRequests("", "In Progress").serviceRequests.size() == 1);
+    CHECK(service.searchServiceRequests("", "Completed").serviceRequests.size() == 1);
+    CHECK(service.searchServiceRequests("", "Cancelled").serviceRequests.size() == 1);
+}
+
+// T11 Required Test 11: Unfiltered query includes all lifecycle states
+DROGON_TEST(UnfilteredQueryIncludesAllStatusesTest)
+{
+    Database db(makeTempDbPath("sr_query_all_statuses"));
+    ServiceRequestRepository repository(db);
+    ServiceRequestQueryService service(repository);
+
+    saveQueryRequest(repository, "Type A", "Desc", "2026-09-10", ServiceRequestStatus::Pending);
+    saveQueryRequest(repository, "Type B", "Desc", "2026-09-11", ServiceRequestStatus::InProgress);
+    saveQueryRequest(repository, "Type C", "Desc", "2026-09-12", ServiceRequestStatus::Completed);
+    saveQueryRequest(repository, "Type D", "Desc", "2026-09-13", ServiceRequestStatus::Cancelled);
+
+    std::vector<ServiceRequest> listed = service.listServiceRequests();
+    std::vector<ServiceRequest> searched = service.searchServiceRequests("desc").serviceRequests;
+
+    for (const std::vector<ServiceRequest> *results : {&listed, &searched})
+    {
+        REQUIRE(results->size() == 4);
+        std::set<ServiceRequestStatus> statuses;
+        for (const ServiceRequest &request : *results)
+        {
+            statuses.insert(request.getStatus());
+        }
+        CHECK(statuses.size() == 4);
+    }
+}
+
+// T11 Required Test 12: Text search and status filter combined
+DROGON_TEST(CombinedTextSearchAndStatusFilterTest)
+{
+    Database db(makeTempDbPath("sr_query_combined"));
+    ServiceRequestRepository repository(db);
+    ServiceRequestQueryService service(repository);
+
+    int both = saveQueryRequest(repository, "Barangay Clearance", "Employment requirement",
+                                "2026-09-10", ServiceRequestStatus::Pending).getId().value();
+    saveQueryRequest(repository, "Barangay Clearance", "Scholarship requirement",
+                     "2026-09-11", ServiceRequestStatus::Completed);   // text only
+    saveQueryRequest(repository, "Community Assistance", "Employment support",
+                     "2026-09-12", ServiceRequestStatus::Pending);     // status only
+    saveQueryRequest(repository, "Business Permit", "New stall",
+                     "2026-09-13", ServiceRequestStatus::Cancelled);   // neither
+
+    ServiceRequestQueryResult result = service.searchServiceRequests("clearance", "Pending");
+
+    REQUIRE(result.success);
+    CHECK(idsOf(result.serviceRequests) == std::vector<int>{both});
+}
+
+// T11 Required Test 13: A request matching in both fields appears once
+DROGON_TEST(MatchingServiceRequestIsNotDuplicatedTest)
+{
+    Database db(makeTempDbPath("sr_query_no_duplicate"));
+    ServiceRequestRepository repository(db);
+    ServiceRequestQueryService service(repository);
+
+    int id = saveQueryRequest(repository, "Community Assistance",
+                              "Assistance requested for medical support", "2026-09-10").getId().value();
+    saveQueryRequest(repository, "Business Permit", "New stall", "2026-09-11");
+
+    ServiceRequestQueryResult result = service.searchServiceRequests("assistance");
+
+    REQUIRE(result.success);
+    CHECK(idsOf(result.serviceRequests) == std::vector<int>{id});
+}
+
+// T11 Required Test 14: Query results preserve complete Service Request information
+DROGON_TEST(QueryResultsPreserveServiceRequestInformationTest)
+{
+    Database db(makeTempDbPath("sr_query_preserve"));
+    ServiceRequestRepository repository(db);
+    ServiceRequestQueryService service(repository);
+
+    ServiceRequest saved = saveQueryRequest(repository, "Barangay Clearance",
+                                            "Needed for employment requirements.",
+                                            "2026-09-25", ServiceRequestStatus::InProgress, 7);
+    int id = saved.getId().value();
+
+    std::vector<ServiceRequest> fromList = service.listServiceRequests();
+    std::vector<ServiceRequest> fromSearch = service.searchServiceRequests("clearance", "In Progress").serviceRequests;
+    std::optional<ServiceRequest> fromView = service.viewServiceRequest(id);
+
+    REQUIRE(fromList.size() == 1);
+    REQUIRE(fromSearch.size() == 1);
+    REQUIRE(fromView.has_value());
+
+    for (const ServiceRequest *request : {&fromList[0], &fromSearch[0], &*fromView})
+    {
+        CHECK(request->getId().value() == id);
+        CHECK(request->getResidentId() == 7);
+        CHECK(request->getServiceType() == "Barangay Clearance");
+        CHECK(request->getDescription() == "Needed for employment requirements.");
+        CHECK(request->getDateRequested() == "2026-09-25");
+        CHECK(request->getStatus() == ServiceRequestStatus::InProgress);
+    }
+}
+
+// Additional T11 coverage: unsupported non-blank status filters are rejected,
+// not silently treated as "no filter".
+DROGON_TEST(UnsupportedStatusFilterIsRejectedTest)
+{
+    Database db(makeTempDbPath("sr_query_bad_status"));
+    ServiceRequestRepository repository(db);
+    ServiceRequestQueryService service(repository);
+
+    saveQueryRequest(repository, "Barangay Clearance", "Employment", "2026-09-10");
+
+    for (const std::string &bad : {"Approved", "Rejected", "Closed", "Done", "Processing", "pending", "InProgress"})
+    {
+        ServiceRequestQueryResult result = service.searchServiceRequests("clearance", bad);
+        CHECK(!result.success);
+        CHECK(result.unsupportedStatus);
+        CHECK(result.serviceRequests.empty());
+    }
+}
+
+// Additional T11 coverage: a blank status filter means every status.
+DROGON_TEST(BlankStatusFilterMeansAllStatusesTest)
+{
+    Database db(makeTempDbPath("sr_query_blank_status"));
+    ServiceRequestRepository repository(db);
+    ServiceRequestQueryService service(repository);
+
+    saveQueryRequest(repository, "Type A", "Desc", "2026-09-10", ServiceRequestStatus::Pending);
+    saveQueryRequest(repository, "Type B", "Desc", "2026-09-11", ServiceRequestStatus::Cancelled);
+
+    for (const std::string &blank : {"", "   "})
+    {
+        ServiceRequestQueryResult result = service.searchServiceRequests("", blank);
+        CHECK(result.success);
+        CHECK(result.serviceRequests.size() == 2);
+    }
+}
+
+// Additional T11 coverage: leading/trailing whitespace on the search term is
+// ignored, and the stored text is not changed.
+DROGON_TEST(SearchTermWhitespaceIsIgnoredTest)
+{
+    Database db(makeTempDbPath("sr_query_trim"));
+    ServiceRequestRepository repository(db);
+    ServiceRequestQueryService service(repository);
+
+    int id = saveQueryRequest(repository, "Barangay Clearance", "Employment", "2026-09-10").getId().value();
+
+    ServiceRequestQueryResult result = service.searchServiceRequests("   clearance   ");
+
+    REQUIRE(result.success);
+    CHECK(idsOf(result.serviceRequests) == std::vector<int>{id});
+    CHECK(service.viewServiceRequest(id)->getServiceType() == "Barangay Clearance");
+}
+
+// Additional T11 coverage: text search covers only serviceType and description.
+DROGON_TEST(TextSearchDoesNotCoverOtherFieldsTest)
+{
+    Database db(makeTempDbPath("sr_query_other_fields"));
+    ServiceRequestRepository repository(db);
+    ServiceRequestQueryService service(repository);
+
+    saveQueryRequest(repository, "Barangay Clearance", "Employment",
+                     "2026-09-10", ServiceRequestStatus::Pending, 42);
+
+    CHECK(service.searchServiceRequests("42").serviceRequests.empty());       // residentId
+    CHECK(service.searchServiceRequests("2026-09").serviceRequests.empty());  // dateRequested
+    CHECK(service.searchServiceRequests("Pending").serviceRequests.empty());  // status
+}
+
+// Additional T11 coverage: search input is bound as data, so SQL wildcard and
+// injection characters match literally instead of changing the query.
+DROGON_TEST(SearchTermWildcardsAndQuotesAreLiteralTest)
+{
+    std::string path = makeTempDbPath("sr_query_literal");
+    Database db(path);
+    ServiceRequestRepository repository(db);
+    ServiceRequestQueryService service(repository);
+
+    int percentId = saveQueryRequest(repository, "Discount", "Needs 50% subsidy", "2026-09-10").getId().value();
+    saveQueryRequest(repository, "Barangay Clearance", "Employment", "2026-09-11");
+
+    CHECK(idsOf(service.searchServiceRequests("%").serviceRequests) == std::vector<int>{percentId});
+    CHECK(service.searchServiceRequests("_").serviceRequests.empty());
+    CHECK(service.searchServiceRequests("' OR '1'='1").serviceRequests.empty());
+    CHECK(service.searchServiceRequests("x'; DROP TABLE service_requests; --").serviceRequests.empty());
+    CHECK(countServiceRequestsInDatabase(path) == 2);
+}
+
+// Additional T11 coverage: querying is read-only and works across statuses,
+// including terminal ones, without changing any stored status.
+DROGON_TEST(QueryingDoesNotModifyServiceRequestsTest)
+{
+    std::string path = makeTempDbPath("sr_query_read_only");
+    Database db(path);
+    ServiceRequestRepository repository(db);
+    ServiceRequestQueryService service(repository);
+
+    int completedId = saveQueryRequest(repository, "Barangay Clearance", "Done", "2026-09-10",
+                                       ServiceRequestStatus::Completed).getId().value();
+    int cancelledId = saveQueryRequest(repository, "Barangay Clearance", "Dropped", "2026-09-11",
+                                       ServiceRequestStatus::Cancelled).getId().value();
+
+    service.listServiceRequests();
+    service.viewServiceRequest(completedId);
+    service.searchServiceRequests("clearance", "Completed");
+    service.searchServiceRequests("clearance", "Cancelled");
+    service.searchServiceRequests("clearance", "Approved");
+
+    CHECK(countServiceRequestsInDatabase(path) == 2);
+    CHECK(readStatusFromDatabase(path, completedId) == "Completed");
+    CHECK(readStatusFromDatabase(path, cancelledId) == "Cancelled");
+    CHECK(idsOf(service.searchServiceRequests("clearance", "Completed").serviceRequests) == std::vector<int>{completedId});
+    CHECK(idsOf(service.searchServiceRequests("clearance", "Cancelled").serviceRequests) == std::vector<int>{cancelledId});
+}
+
+// Additional T11 coverage: search and filter results use the same ordering as
+// listing (dateRequested DESC, then id DESC).
+DROGON_TEST(SearchResultsUseRequiredOrderingTest)
+{
+    Database db(makeTempDbPath("sr_query_search_ordering"));
+    ServiceRequestRepository repository(db);
+    ServiceRequestQueryService service(repository);
+
+    int id1 = saveQueryRequest(repository, "Barangay Clearance", "A", "2026-09-15").getId().value();
+    int id2 = saveQueryRequest(repository, "Barangay Clearance", "B", "2026-09-18").getId().value();
+    int id3 = saveQueryRequest(repository, "Barangay Clearance", "C", "2026-09-10").getId().value();
+    int id4 = saveQueryRequest(repository, "Barangay Clearance", "D", "2026-09-18").getId().value();
+
+    std::vector<int> expected = {id4, id2, id1, id3};
+
+    CHECK(idsOf(service.searchServiceRequests("clearance").serviceRequests) == expected);
+    CHECK(idsOf(service.searchServiceRequests("clearance", "Pending").serviceRequests) == expected);
+    CHECK(idsOf(service.searchServiceRequests("", "Pending").serviceRequests) == expected);
 }
 
 // Keeping the original starter test so existing behavior is preserved.
