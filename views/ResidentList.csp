@@ -1,0 +1,90 @@
+<%inc
+#include <vector>
+#include "models/Resident.h"
+#include "views/ResidentLayout.h"
+%>
+<%c++
+const auto &residents = @@.get<std::vector<Resident>>("residents");
+const auto &searchTerm = @@.get<std::string>("searchTerm");
+const auto &message = @@.get<std::string>("message");
+%>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Resident Management - CSMS</title>
+    <style><%c++ $$ << residentPageStyles(); %></style>
+</head>
+<body>
+<main>
+    <h1>Resident Management</h1>
+
+    <%c++ if (!message.empty()) { %>
+    <div class="message success" role="status"><%c++ $$ << h(message); %></div>
+    <%c++ } %>
+
+    <div class="toolbar">
+        <form class="search" method="get" action="/residents">
+            <div>
+                <label for="q">Search Residents</label>
+                <input type="search" id="q" name="q" value="<%c++ $$ << h(searchTerm); %>" placeholder="First or last name">
+            </div>
+            <button type="submit">Search</button>
+            <%c++ if (!searchTerm.empty()) { %>
+            <a class="button secondary" href="/residents">Clear</a>
+            <%c++ } %>
+        </form>
+        <a class="button" href="/residents/register">Register Resident</a>
+    </div>
+
+    <%c++ if (residents.empty()) { %>
+    <p class="empty">No Residents found.</p>
+    <%c++ } else { %>
+    <div class="table-wrap">
+    <table>
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>First Name</th>
+                <th>Last Name</th>
+                <th>Address</th>
+                <th>Contact Number</th>
+                <th>Email</th>
+                <th>Status</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+        <%c++ for (const auto &resident : residents) {
+            const std::string id = std::to_string(resident.getId().value_or(0));
+            const std::string status = residentStatusToString(resident.getStatus());
+            const bool active = resident.getStatus() == ResidentStatus::Active;
+        %>
+            <tr>
+                <td><%c++ $$ << id; %></td>
+                <td><%c++ $$ << h(resident.getFirstName()); %></td>
+                <td><%c++ $$ << h(resident.getLastName()); %></td>
+                <td><%c++ $$ << h(resident.getAddress()); %></td>
+                <td><%c++ $$ << h(resident.getContactNumber()); %></td>
+                <td><%c++ $$ << h(resident.getEmail()); %></td>
+                <td><span class="badge <%c++ $$ << (active ? "active" : "inactive"); %>"><%c++ $$ << status; %></span></td>
+                <td>
+                    <div class="actions">
+                        <a href="/residents/<%c++ $$ << id; %>/edit">Edit</a>
+                        <%c++ if (active) { %>
+                        <form method="post" action="/residents/<%c++ $$ << id; %>/deactivate">
+                            <button type="submit" class="secondary">Deactivate</button>
+                        </form>
+                        <%c++ } %>
+                    </div>
+                </td>
+            </tr>
+        <%c++ } %>
+        </tbody>
+    </table>
+    </div>
+    <%c++ } %>
+</main>
+</body>
+</html>

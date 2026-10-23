@@ -38,3 +38,8 @@ logs/
 # Operating-system files
 .DS_Store
 Thumbs.db
+
+#backend files
+*.db
+*.sqlite
+*.sqlite3
