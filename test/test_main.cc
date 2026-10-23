@@ -19,7 +19,12 @@
 #include "../services/ServiceRequestSubmissionService.h"
 #include "../services/ServiceRequestStatusService.h"
 #include "../services/ServiceRequestQueryService.h"
+#include "../services/ResidentServices.h"
 
+#include "../controllers/ResidentController.h"
+
+#include <algorithm>
+#include <map>
 #include <sqlite3.h>
 #include <filesystem>
 #include <cstdio>
@@ -2650,6 +2655,547 @@ DROGON_TEST(SearchResultsUseRequiredOrderingTest)
     CHECK(idsOf(service.searchServiceRequests("clearance").serviceRequests) == expected);
     CHECK(idsOf(service.searchServiceRequests("clearance", "Pending").serviceRequests) == expected);
     CHECK(idsOf(service.searchServiceRequests("", "Pending").serviceRequests) == expected);
+}
+
+// ---------------------------------------------------------------------------
+// T12 - Resident Management Interface (presentation/integration tests)
+//
+// These tests drive ResidentController with real HttpRequest objects, so the
+// whole path is exercised: controller -> application services -> validator ->
+// repository -> SQLite -> rendered view. ResidentServices is pointed at a
+// throwaway database file, and Residents are persisted through the existing
+// T04 registration service.
+// ---------------------------------------------------------------------------
+
+namespace t12
+{
+using Params = std::map<std::string, std::string>;
+
+HttpRequestPtr makeRequest(HttpMethod method, const Params &params)
+{
+    auto req = HttpRequest::newHttpRequest();
+    req->setMethod(method);
+    for (const auto &entry : params)
+    {
+        req->setParameter(entry.first, entry.second);
+    }
+    return req;
+}
+
+// The controller invokes its callback before returning, so a plain local
+// variable is enough to capture the response.
+HttpResponsePtr listPage(const Params &params = {})
+{
+    HttpResponsePtr response;
+    ResidentController().list(makeRequest(Get, params),
+                              [&](const HttpResponsePtr &r) { response = r; });
+    return response;
+}
+
+HttpResponsePtr registerForm()
+{
+    HttpResponsePtr response;
+    ResidentController().showRegisterForm(makeRequest(Get, {}),
+                                          [&](const HttpResponsePtr &r) { response = r; });
+    return response;
+}
+
+HttpResponsePtr submitRegistration(const Params &params)
+{
+    HttpResponsePtr response;
+    ResidentController().registerResident(makeRequest(Post, params),
+                                          [&](const HttpResponsePtr &r) { response = r; });
+    return response;
+}
+
+HttpResponsePtr editForm(const std::string &id)
+{
+    HttpResponsePtr response;
+    ResidentController().showEditForm(makeRequest(Get, {}),
+                                      [&](const HttpResponsePtr &r) { response = r; },
+                                      id);
+    return response;
+}
+
+HttpResponsePtr submitUpdate(const std::string &id, const Params &params)
+{
+    HttpResponsePtr response;
+    ResidentController().updateResident(makeRequest(Post, params),
+                                        [&](const HttpResponsePtr &r) { response = r; },
+                                        id);
+    return response;
+}
+
+HttpResponsePtr submitDeactivation(const std::string &id)
+{
+    HttpResponsePtr response;
+    ResidentController().deactivateResident(makeRequest(Post, {}),
+                                            [&](const HttpResponsePtr &r) { response = r; },
+                                            id);
+    return response;
+}
+
+std::string bodyOf(const HttpResponsePtr &response)
+{
+    return std::string(response->body());
+}
+
+bool contains(const std::string &text, const std::string &fragment)
+{
+    return text.find(fragment) != std::string::npos;
+}
+
+Params validForm(const std::string &firstName = "Maria",
+                 const std::string &lastName = "Santos")
+{
+    return {{"firstName", firstName},
+            {"lastName", lastName},
+            {"address", "12 Rizal Street, Carmona, Cavite"},
+            {"contactNumber", "09171234567"},
+            {"email", "resident@example.com"}};
+}
+
+// Starts a fresh database for the web layer and returns the persisted id.
+void useFreshDatabase(const std::string &name)
+{
+    ResidentServices::useDatabase(makeTempDbPath(name));
+}
+
+int persistResident(const std::string &firstName,
+                    const std::string &lastName,
+                    ResidentStatus status = ResidentStatus::Active)
+{
+    // Emails cannot contain spaces, so strip them from the name-based address.
+    std::string emailName = firstName + "." + lastName;
+    emailName.erase(std::remove(emailName.begin(), emailName.end(), ' '), emailName.end());
+
+    Resident resident(firstName,
+                      lastName,
+                      "12 Rizal Street, Carmona, Cavite",
+                      "09171234567",
+                      emailName + "@example.com",
+                      status);
+    auto result = ResidentServices::instance().registration().registerResident(resident);
+    return result.resident->getId().value();
+}
+
+std::string statusOf(int id)
+{
+    return residentStatusToString(ResidentServices::instance().repository().findById(id)->getStatus());
+}
+
+size_t residentCount()
+{
+    return ResidentServices::instance().repository().findAll().size();
+}
+} // namespace t12
+
+// T12 Required Test 1: Resident Management Page Loads Successfully
+DROGON_TEST(T12ResidentManagementPageLoadsTest)
+{
+    t12::useFreshDatabase("t12_page_loads");
+
+    auto response = t12::listPage();
+    REQUIRE(response != nullptr);
+    CHECK(response->statusCode() == k200OK);
+
+    const std::string body = t12::bodyOf(response);
+    CHECK(t12::contains(body, "<h1>Resident Management</h1>"));
+    CHECK(t12::contains(body, "Register Resident"));
+    CHECK(t12::contains(body, "name=\"q\""));
+    CHECK(t12::contains(body, ">Search</button>"));
+}
+
+// An empty database must render a friendly message, not an error or "null".
+DROGON_TEST(T12EmptyResidentListRendersMessageTest)
+{
+    t12::useFreshDatabase("t12_empty");
+
+    auto response = t12::listPage();
+    CHECK(response->statusCode() == k200OK);
+
+    const std::string body = t12::bodyOf(response);
+    CHECK(t12::contains(body, "No Residents found."));
+    CHECK(!t12::contains(body, "null"));
+    CHECK(!t12::contains(body, "<table"));
+}
+
+// T12 Required Test 2: Resident List Displays Persisted Residents
+DROGON_TEST(T12ResidentListDisplaysPersistedResidentsTest)
+{
+    t12::useFreshDatabase("t12_list");
+    int mariaId = t12::persistResident("Maria", "Santos");
+    t12::persistResident("Juan", "Dela Cruz");
+
+    const std::string body = t12::bodyOf(t12::listPage());
+
+    CHECK(t12::contains(body, ">Maria<"));
+    CHECK(t12::contains(body, ">Santos<"));
+    CHECK(t12::contains(body, ">Juan<"));
+    CHECK(t12::contains(body, ">Dela Cruz<"));
+    CHECK(t12::contains(body, "12 Rizal Street, Carmona, Cavite"));
+    CHECK(t12::contains(body, "09171234567"));
+    CHECK(t12::contains(body, "Maria.Santos@example.com"));
+    CHECK(t12::contains(body, ">Active<"));
+    CHECK(t12::contains(body, "/residents/" + std::to_string(mariaId) + "/edit"));
+}
+
+// The page must preserve the T05 order: lastName, firstName, id.
+DROGON_TEST(T12ResidentListKeepsT05OrderingTest)
+{
+    t12::useFreshDatabase("t12_ordering");
+    t12::persistResident("Zed", "Santos");
+    t12::persistResident("Ana", "Santos");
+    t12::persistResident("Maria", "Abad");
+
+    const std::string body = t12::bodyOf(t12::listPage());
+
+    const size_t abad = body.find(">Abad<");
+    const size_t anaSantos = body.find(">Ana<");
+    const size_t zedSantos = body.find(">Zed<");
+    REQUIRE(abad != std::string::npos);
+    REQUIRE(anaSantos != std::string::npos);
+    REQUIRE(zedSantos != std::string::npos);
+    CHECK(abad < anaSantos);
+    CHECK(anaSantos < zedSantos);
+}
+
+// T12 Required Test 3: Resident Search Uses Existing Search Behavior
+DROGON_TEST(T12ResidentSearchUsesExistingSearchTest)
+{
+    t12::useFreshDatabase("t12_search");
+    t12::persistResident("Maria", "Santos");
+    t12::persistResident("Juan", "Dela Cruz");
+
+    const std::string byFirst = t12::bodyOf(t12::listPage({{"q", "MAR"}}));
+    CHECK(t12::contains(byFirst, ">Maria<"));
+    CHECK(!t12::contains(byFirst, ">Juan<"));
+
+    const std::string byLast = t12::bodyOf(t12::listPage({{"q", "   santos   "}}));
+    CHECK(t12::contains(byLast, ">Santos<"));
+    CHECK(!t12::contains(byLast, ">Dela Cruz<"));
+
+    // The submitted term stays visible in the search box.
+    CHECK(t12::contains(byFirst, "value=\"MAR\""));
+}
+
+// A search with no matches is a normal page, not an error.
+DROGON_TEST(T12NoMatchSearchRendersMessageTest)
+{
+    t12::useFreshDatabase("t12_no_match");
+    t12::persistResident("Maria", "Santos");
+
+    auto response = t12::listPage({{"q", "zzzz"}});
+    CHECK(response->statusCode() == k200OK);
+
+    const std::string body = t12::bodyOf(response);
+    CHECK(t12::contains(body, "No Residents found."));
+    CHECK(!t12::contains(body, ">Maria<"));
+}
+
+// T12 Required Test 4: Blank Search Displays All Residents
+DROGON_TEST(T12BlankSearchDisplaysAllResidentsTest)
+{
+    t12::useFreshDatabase("t12_blank_search");
+    t12::persistResident("Maria", "Santos");
+    t12::persistResident("Juan", "Dela Cruz");
+
+    for (const std::string term : {"", " ", "       "})
+    {
+        auto response = t12::listPage({{"q", term}});
+        CHECK(response->statusCode() == k200OK);
+
+        const std::string body = t12::bodyOf(response);
+        CHECK(t12::contains(body, ">Maria<"));
+        CHECK(t12::contains(body, ">Juan<"));
+    }
+}
+
+// T12 Required Test 5: Registration Form Is Accessible
+DROGON_TEST(T12RegistrationFormIsAccessibleTest)
+{
+    t12::useFreshDatabase("t12_register_form");
+
+    auto response = t12::registerForm();
+    CHECK(response->statusCode() == k200OK);
+
+    const std::string body = t12::bodyOf(response);
+    for (const std::string field : {"firstName", "lastName", "address", "contactNumber", "email"})
+    {
+        CHECK(t12::contains(body, "name=\"" + field + "\""));
+        CHECK(t12::contains(body, "<label for=\"" + field + "\">"));
+    }
+    CHECK(t12::contains(body, "method=\"post\""));
+    CHECK(t12::contains(body, "action=\"/residents/register\""));
+
+    // The user supplies neither an id nor a status.
+    CHECK(!t12::contains(body, "name=\"id\""));
+    CHECK(!t12::contains(body, "name=\"status\""));
+    CHECK(t12::residentCount() == 0); // opening the form creates nothing
+}
+
+// T12 Required Test 6: Valid Registration Persists Resident
+DROGON_TEST(T12ValidRegistrationPersistsResidentTest)
+{
+    t12::useFreshDatabase("t12_valid_register");
+
+    // Extra id/status values in the request must be ignored.
+    t12::Params form = t12::validForm();
+    form["id"] = "999";
+    form["status"] = "Inactive";
+
+    auto response = t12::submitRegistration(form);
+
+    // Post/Redirect/Get: success redirects instead of rendering directly.
+    CHECK(response->statusCode() == k303SeeOther);
+    CHECK(response->getHeader("location") == "/residents?msg=registered");
+
+    auto all = ResidentServices::instance().repository().findAll();
+    REQUIRE(all.size() == 1);
+    CHECK(all[0].getId().has_value());
+    CHECK(all[0].getId().value() != 999);
+    CHECK(all[0].getFirstName() == "Maria");
+    CHECK(all[0].getStatus() == ResidentStatus::Active);
+
+    // Following the redirect shows the success message and the new Resident.
+    const std::string body = t12::bodyOf(t12::listPage({{"msg", "registered"}}));
+    CHECK(t12::contains(body, "Resident registered successfully."));
+    CHECK(t12::contains(body, ">Maria<"));
+}
+
+// T12 Required Test 7: Invalid Registration Shows Validation Feedback and Does Not Persist
+DROGON_TEST(T12InvalidRegistrationShowsFeedbackAndDoesNotPersistTest)
+{
+    t12::useFreshDatabase("t12_invalid_register");
+
+    t12::Params form = t12::validForm("", "Cruz");
+    form["contactNumber"] = "12345";
+    form["email"] = "not-an-email";
+
+    auto response = t12::submitRegistration(form);
+
+    CHECK(response->statusCode() == k422UnprocessableEntity);
+
+    const std::string body = t12::bodyOf(response);
+    CHECK(t12::contains(body, "First name is required."));
+    CHECK(t12::contains(body, "Contact number must follow 09XXXXXXXXX."));
+    CHECK(t12::contains(body, "Email is invalid."));
+
+    // Previously typed values are preserved so the user need not retype them.
+    CHECK(t12::contains(body, "value=\"Cruz\""));
+    CHECK(t12::contains(body, "value=\"12 Rizal Street, Carmona, Cavite\""));
+    CHECK(t12::contains(body, "value=\"not-an-email\""));
+
+    CHECK(t12::residentCount() == 0);
+}
+
+// User-entered text must be escaped when the form is redisplayed.
+DROGON_TEST(T12FormEscapesEnteredValuesTest)
+{
+    t12::useFreshDatabase("t12_escape");
+
+    t12::Params form = t12::validForm("<script>alert(1)</script>", "Cruz");
+    form["email"] = "bad";
+
+    const std::string body = t12::bodyOf(t12::submitRegistration(form));
+
+    CHECK(!t12::contains(body, "<script>alert(1)</script>"));
+    CHECK(t12::contains(body, "&lt;script&gt;alert(1)&lt;/script&gt;"));
+}
+
+// T12 Required Test 8: Edit Form Displays Existing Resident Information
+DROGON_TEST(T12EditFormDisplaysExistingResidentTest)
+{
+    t12::useFreshDatabase("t12_edit_form");
+    int id = t12::persistResident("Maria", "Santos");
+
+    auto response = t12::editForm(std::to_string(id));
+    CHECK(response->statusCode() == k200OK);
+
+    const std::string body = t12::bodyOf(response);
+    CHECK(t12::contains(body, "value=\"Maria\""));
+    CHECK(t12::contains(body, "value=\"Santos\""));
+    CHECK(t12::contains(body, "value=\"12 Rizal Street, Carmona, Cavite\""));
+    CHECK(t12::contains(body, "value=\"09171234567\""));
+    CHECK(t12::contains(body, "value=\"Maria.Santos@example.com\""));
+
+    // ID and status are shown as plain text, never as editable fields.
+    CHECK(t12::contains(body, "Resident ID: <span>" + std::to_string(id) + "</span>"));
+    CHECK(t12::contains(body, "Status: <span>Active</span>"));
+    CHECK(!t12::contains(body, "name=\"id\""));
+    CHECK(!t12::contains(body, "name=\"status\""));
+}
+
+// T12 Required Test 9: Valid Update Persists Changes
+DROGON_TEST(T12ValidUpdatePersistsChangesTest)
+{
+    t12::useFreshDatabase("t12_valid_update");
+    int id = t12::persistResident("Maria", "Santos");
+    ResidentServices::instance().deactivation().deactivateResident(id);
+
+    t12::Params form = t12::validForm("Maria Luisa", "Santos-Reyes");
+    form["address"] = "99 New Street";
+    form["status"] = "Active"; // must be ignored by the update
+    form["id"] = "12345";      // must be ignored by the update
+
+    auto response = t12::submitUpdate(std::to_string(id), form);
+
+    CHECK(response->statusCode() == k303SeeOther);
+    CHECK(response->getHeader("location") == "/residents?msg=updated");
+
+    auto stored = ResidentServices::instance().repository().findById(id);
+    REQUIRE(stored.has_value());
+    CHECK(stored->getId().value() == id);
+    CHECK(stored->getFirstName() == "Maria Luisa");
+    CHECK(stored->getLastName() == "Santos-Reyes");
+    CHECK(stored->getAddress() == "99 New Street");
+    CHECK(stored->getStatus() == ResidentStatus::Inactive); // status preserved
+    CHECK(t12::residentCount() == 1);
+
+    const std::string body = t12::bodyOf(t12::listPage({{"msg", "updated"}}));
+    CHECK(t12::contains(body, "Resident information updated successfully."));
+    CHECK(t12::contains(body, ">Maria Luisa<"));
+}
+
+// T12 Required Test 10: Invalid Update Does Not Modify Resident
+DROGON_TEST(T12InvalidUpdateDoesNotModifyResidentTest)
+{
+    t12::useFreshDatabase("t12_invalid_update");
+    int id = t12::persistResident("Maria", "Santos");
+
+    t12::Params form = t12::validForm("Changed", "Name");
+    form["contactNumber"] = "bad";
+
+    auto response = t12::submitUpdate(std::to_string(id), form);
+
+    CHECK(response->statusCode() == k422UnprocessableEntity);
+
+    const std::string body = t12::bodyOf(response);
+    CHECK(t12::contains(body, "Contact number must follow 09XXXXXXXXX."));
+    // The form stays available for correction with the attempted values.
+    CHECK(t12::contains(body, "value=\"Changed\""));
+    CHECK(t12::contains(body, "Resident ID: <span>" + std::to_string(id) + "</span>"));
+
+    auto stored = ResidentServices::instance().repository().findById(id);
+    REQUIRE(stored.has_value());
+    CHECK(stored->getFirstName() == "Maria");
+    CHECK(stored->getLastName() == "Santos");
+    CHECK(stored->getContactNumber() == "09171234567");
+}
+
+// T12 Required Test 11: Missing Resident Edit Is Handled Safely
+DROGON_TEST(T12MissingResidentEditIsHandledSafelyTest)
+{
+    t12::useFreshDatabase("t12_missing");
+
+    for (const std::string id : {"999", "0", "-5", "abc", "99999999999999999999", ""})
+    {
+        auto response = t12::editForm(id);
+        REQUIRE(response != nullptr);
+        CHECK(response->statusCode() == k404NotFound);
+        CHECK(t12::contains(t12::bodyOf(response), "Resident Not Found"));
+        CHECK(t12::contains(t12::bodyOf(response), "href=\"/residents\""));
+    }
+
+    // Submitting an update or deactivation for a missing Resident also 404s
+    // and creates nothing.
+    CHECK(t12::submitUpdate("999", t12::validForm())->statusCode() == k404NotFound);
+    CHECK(t12::submitDeactivation("999")->statusCode() == k404NotFound);
+    CHECK(t12::residentCount() == 0);
+}
+
+// T12 Required Test 12: Active Resident Can Be Deactivated Through the Interface
+DROGON_TEST(T12ActiveResidentCanBeDeactivatedTest)
+{
+    t12::useFreshDatabase("t12_deactivate");
+    int id = t12::persistResident("Maria", "Santos");
+
+    // Active Residents are offered a Deactivate action (a POST form).
+    const std::string before = t12::bodyOf(t12::listPage());
+    CHECK(t12::contains(before, "action=\"/residents/" + std::to_string(id) + "/deactivate\""));
+    CHECK(t12::contains(before, "Deactivate</button>"));
+
+    auto response = t12::submitDeactivation(std::to_string(id));
+
+    CHECK(response->statusCode() == k303SeeOther);
+    CHECK(response->getHeader("location") == "/residents?msg=deactivated");
+
+    auto stored = ResidentServices::instance().repository().findById(id);
+    REQUIRE(stored.has_value()); // soft deactivation: the row still exists
+    CHECK(stored->getStatus() == ResidentStatus::Inactive);
+    CHECK(stored->getFirstName() == "Maria");
+    CHECK(t12::residentCount() == 1);
+
+    CHECK(t12::contains(t12::bodyOf(t12::listPage({{"msg", "deactivated"}})),
+                        "Resident deactivated successfully."));
+}
+
+// A repeated deactivation is safe because T07, not the button, enforces it.
+DROGON_TEST(T12RepeatedDeactivationIsSafeTest)
+{
+    t12::useFreshDatabase("t12_repeat_deactivate");
+    int id = t12::persistResident("Maria", "Santos");
+
+    t12::submitDeactivation(std::to_string(id));
+    auto second = t12::submitDeactivation(std::to_string(id));
+
+    CHECK(second->statusCode() == k303SeeOther);
+    CHECK(second->getHeader("location") == "/residents?msg=alreadyinactive");
+    CHECK(t12::statusOf(id) == "Inactive");
+    CHECK(t12::residentCount() == 1);
+}
+
+// T12 Required Test 13: Inactive Resident Remains Visible
+DROGON_TEST(T12InactiveResidentRemainsVisibleTest)
+{
+    t12::useFreshDatabase("t12_inactive_visible");
+    int id = t12::persistResident("Maria", "Santos");
+    t12::persistResident("Juan", "Dela Cruz");
+    t12::submitDeactivation(std::to_string(id));
+
+    for (const auto &params : {t12::Params{}, t12::Params{{"q", "maria"}}})
+    {
+        const std::string body = t12::bodyOf(t12::listPage(params));
+        CHECK(t12::contains(body, ">Maria<"));
+        CHECK(t12::contains(body, ">Inactive<"));
+    }
+
+    // No Deactivate or reactivation action is offered for the Inactive row.
+    const std::string searched = t12::bodyOf(t12::listPage({{"q", "maria"}}));
+    CHECK(!t12::contains(searched, "/deactivate\""));
+    CHECK(!t12::contains(searched, "Activate"));
+    CHECK(!t12::contains(searched, "Reactivate"));
+    CHECK(t12::contains(searched, "/residents/" + std::to_string(id) + "/edit"));
+}
+
+// T12 Required Test 14: GET Requests Do Not Deactivate Residents
+DROGON_TEST(T12GetRequestsDoNotChangeResidentsTest)
+{
+    t12::useFreshDatabase("t12_get_readonly");
+    int id = t12::persistResident("Maria", "Santos");
+    const std::string idText = std::to_string(id);
+
+    t12::listPage();
+    t12::listPage({{"q", "maria"}});
+    t12::listPage({{"q", "maria"}, {"msg", "deactivated"}});
+    t12::registerForm();
+    t12::editForm(idText);
+
+    CHECK(t12::statusOf(id) == "Active");
+    CHECK(t12::residentCount() == 1);
+    auto stored = ResidentServices::instance().repository().findById(id);
+    CHECK(stored->getFirstName() == "Maria");
+}
+
+// Flash text comes from a fixed list; arbitrary msg values are ignored.
+DROGON_TEST(T12UnknownFlashCodeIsIgnoredTest)
+{
+    t12::useFreshDatabase("t12_flash");
+
+    const std::string body = t12::bodyOf(t12::listPage({{"msg", "<b>hacked</b>"}}));
+
+    CHECK(!t12::contains(body, "hacked"));
+    CHECK(!t12::contains(body, "class=\"message success\""));
 }
 
 // Keeping the original starter test so existing behavior is preserved.

@@ -1,0 +1,19 @@
+<%inc
+#include "views/ResidentLayout.h"
+%>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Resident Not Found - CSMS</title>
+    <style><%c++ $$ << residentPageStyles(); %></style>
+</head>
+<body>
+<main>
+    <h1>Resident Not Found</h1>
+    <div class="message error" role="alert">The requested Resident does not exist.</div>
+    <a class="button" href="/residents">Back to Resident Management</a>
+</main>
+</body>
+</html>

@@ -32,6 +32,7 @@ add_executable(${PROJECT_NAME}
     services/ResidentSearchService.cc
     services/ResidentUpdateService.cc
     services/ResidentDeactivationService.cc
+    services/ResidentServices.cc
     services/ServiceRequestSubmissionService.cc
     services/ServiceRequestStatusService.cc
     services/ServiceRequestQueryService.cc
