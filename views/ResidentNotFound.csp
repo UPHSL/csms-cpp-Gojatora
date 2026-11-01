@@ -10,6 +10,7 @@
     <style><%c++ $$ << residentPageStyles(); %></style>
 </head>
 <body>
+<%c++ $$ << navigationBar("residents"); %>
 <main>
     <h1>Resident Not Found</h1>
     <div class="message error" role="alert">The requested Resident does not exist.</div>

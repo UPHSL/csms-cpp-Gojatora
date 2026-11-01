@@ -17,6 +17,7 @@ const auto &message = @@.get<std::string>("message");
     <style><%c++ $$ << residentPageStyles(); %></style>
 </head>
 <body>
+<%c++ $$ << navigationBar("residents"); %>
 <main>
     <h1>Resident Management</h1>
 

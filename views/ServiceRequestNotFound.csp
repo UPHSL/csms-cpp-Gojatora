@@ -1,0 +1,20 @@
+<%inc
+#include "views/ServiceRequestLayout.h"
+%>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Service Request Not Found - CSMS</title>
+    <style><%c++ $$ << residentPageStyles(); %></style>
+</head>
+<body>
+<%c++ $$ << navigationBar("service-requests"); %>
+<main>
+    <h1>Service Request Not Found</h1>
+    <div class="message error" role="alert">The requested Service Request does not exist.</div>
+    <a class="button" href="/service-requests">Back to Service Request Management</a>
+</main>
+</body>
+</html>

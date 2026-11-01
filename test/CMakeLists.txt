@@ -16,6 +16,7 @@ add_executable(${PROJECT_NAME}
     ../services/ResidentDeactivationService.cc
     ../services/ResidentServices.cc
     ../controllers/ResidentController.cc
+    ../controllers/ServiceRequestController.cc
     ../services/ServiceRequestSubmissionService.cc
     ../services/ServiceRequestStatusService.cc
     ../services/ServiceRequestQueryService.cc
