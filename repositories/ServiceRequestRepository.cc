@@ -89,7 +89,8 @@ std::vector<ServiceRequest> ServiceRequestRepository::findAll()
 }
 
 std::vector<ServiceRequest> ServiceRequestRepository::search(const std::string &searchTerm,
-                                                             std::optional<ServiceRequestStatus> statusFilter)
+                                                             std::optional<ServiceRequestStatus> statusFilter,
+                                                             std::optional<int> limit)
 {
     // The SQL text is assembled only from fixed fragments chosen by whether
     // a condition applies; the search term and status are never pasted into
@@ -113,7 +114,14 @@ std::vector<ServiceRequest> ServiceRequestRepository::search(const std::string &
         sql += " AND status = ?";
     }
 
-    sql += " ORDER BY date_requested DESC, id DESC;";
+    sql += " ORDER BY date_requested DESC, id DESC";
+
+    if (limit.has_value())
+    {
+        sql += " LIMIT ?";
+    }
+
+    sql += ";";
 
     sqlite3_stmt *statement = nullptr;
     int prepareResult = sqlite3_prepare_v2(database_.handle(), sql.c_str(), -1, &statement, nullptr);
@@ -149,6 +157,11 @@ std::vector<ServiceRequest> ServiceRequestRepository::search(const std::string &
                           serviceRequestStatusToString(*statusFilter).c_str(), -1, SQLITE_TRANSIENT);
     }
 
+    if (limit.has_value())
+    {
+        sqlite3_bind_int(statement, parameterIndex++, *limit);
+    }
+
     std::vector<ServiceRequest> requests;
     while (sqlite3_step(statement) == SQLITE_ROW)
     {
@@ -157,6 +170,63 @@ std::vector<ServiceRequest> ServiceRequestRepository::search(const std::string &
 
     sqlite3_finalize(statement);
     return requests;
+}
+
+std::vector<ServiceRequest> ServiceRequestRepository::findRecent(int limit)
+{
+    // A negative LIMIT means "no limit" in SQLite, so guard it here.
+    if (limit <= 0)
+    {
+        return {};
+    }
+
+    // Same query and ordering as listing (T11), just capped.
+    return search("", std::nullopt, limit);
+}
+
+int ServiceRequestRepository::readCount(sqlite3_stmt *statement, const char *what) const
+{
+    // COUNT(*) always yields exactly one row, even over an empty table.
+    if (sqlite3_step(statement) != SQLITE_ROW)
+    {
+        std::string errorMessage = sqlite3_errmsg(database_.handle());
+        sqlite3_finalize(statement);
+        throw std::runtime_error(std::string("Failed to count ") + what + ": " + errorMessage);
+    }
+
+    int count = sqlite3_column_int(statement, 0);
+    sqlite3_finalize(statement);
+    return count;
+}
+
+int ServiceRequestRepository::countAll()
+{
+    const char *sql = "SELECT COUNT(*) FROM service_requests;";
+
+    sqlite3_stmt *statement = nullptr;
+    if (sqlite3_prepare_v2(database_.handle(), sql, -1, &statement, nullptr) != SQLITE_OK)
+    {
+        throw std::runtime_error("Failed to prepare service request count: " +
+                                  std::string(sqlite3_errmsg(database_.handle())));
+    }
+
+    return readCount(statement, "Service Requests");
+}
+
+int ServiceRequestRepository::countByStatus(ServiceRequestStatus status)
+{
+    const char *sql = "SELECT COUNT(*) FROM service_requests WHERE status = ?;";
+
+    sqlite3_stmt *statement = nullptr;
+    if (sqlite3_prepare_v2(database_.handle(), sql, -1, &statement, nullptr) != SQLITE_OK)
+    {
+        throw std::runtime_error("Failed to prepare service request status count: " +
+                                  std::string(sqlite3_errmsg(database_.handle())));
+    }
+
+    sqlite3_bind_text(statement, 1, serviceRequestStatusToString(status).c_str(), -1, SQLITE_TRANSIENT);
+
+    return readCount(statement, "Service Requests by status");
 }
 
 bool ServiceRequestRepository::updateStatus(int serviceRequestId, ServiceRequestStatus newStatus)

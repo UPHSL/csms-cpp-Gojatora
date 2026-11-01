@@ -21,7 +21,8 @@ ResidentServices::ResidentServices(const std::string &dbPath)
       serviceRequestRepository_(database_),
       submission_(serviceRequestValidator_, repository_, serviceRequestRepository_),
       status_(serviceRequestRepository_),
-      query_(serviceRequestRepository_)
+      query_(serviceRequestRepository_),
+      dashboard_(repository_, serviceRequestRepository_)
 {
 }
 

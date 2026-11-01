@@ -19,10 +19,12 @@
 #include "../services/ServiceRequestSubmissionService.h"
 #include "../services/ServiceRequestStatusService.h"
 #include "../services/ServiceRequestQueryService.h"
+#include "../services/DashboardService.h"
 #include "../services/ResidentServices.h"
 
 #include "../controllers/ResidentController.h"
 #include "../controllers/ServiceRequestController.h"
+#include "../controllers/DashboardController.h"
 
 #include <algorithm>
 #include <map>
@@ -4038,6 +4040,571 @@ DROGON_TEST(T13NavigationBetweenModulesExistsTest)
         CHECK(t12::contains(body, "<a href=\"/residents\""));
         CHECK(t12::contains(body, "<a href=\"/service-requests\""));
     }
+}
+
+// ---------------------------------------------------------------------------
+// T14 - CSMS Dashboard (aggregate querying + presentation tests)
+//
+// Data is persisted through the existing business capabilities (T04
+// registration, T07 deactivation, T09 submission, T10 status changes) and the
+// dashboard is then read through DashboardService / DashboardController, so
+// the whole path is exercised: controller -> DashboardService -> repository
+// COUNT/LIMIT queries -> SQLite -> rendered view.
+// ---------------------------------------------------------------------------
+
+namespace t14
+{
+HttpResponsePtr dashboardPage()
+{
+    HttpResponsePtr response;
+    DashboardController().show(t12::makeRequest(Get, {}),
+                               [&](const HttpResponsePtr &r) { response = r; });
+    return response;
+}
+
+DashboardSummary summary()
+{
+    return ResidentServices::instance().dashboard().getSummary();
+}
+
+// One summary card exactly as the dashboard prints it: label and number as text.
+std::string card(const std::string &label, int value)
+{
+    return "<div class=\"stat-label\">" + label + "</div><div class=\"stat-value\">" +
+           std::to_string(value) + "</div>";
+}
+
+std::vector<int> recentIds(const DashboardSummary &s)
+{
+    std::vector<int> ids;
+    for (const auto &request : s.recentServiceRequests)
+    {
+        ids.push_back(request.getId().value());
+    }
+    return ids;
+}
+
+int deactivate(int residentId)
+{
+    ResidentServices::instance().deactivation().deactivateResident(residentId);
+    return residentId;
+}
+
+// A plain-text snapshot of every persisted Resident and Service Request, so a
+// test can prove nothing changed.
+std::vector<std::string> snapshot()
+{
+    std::vector<std::string> rows;
+    for (const auto &r : ResidentServices::instance().repository().findAll())
+    {
+        rows.push_back("R|" + std::to_string(r.getId().value()) + "|" + r.getFirstName() + "|" +
+                       r.getLastName() + "|" + r.getAddress() + "|" + r.getContactNumber() + "|" +
+                       r.getEmail() + "|" + residentStatusToString(r.getStatus()));
+    }
+    for (const auto &q : ResidentServices::instance().serviceRequestRepository().findAll())
+    {
+        rows.push_back("S|" + std::to_string(q.getId().value()) + "|" +
+                       std::to_string(q.getResidentId()) + "|" + q.getServiceType() + "|" +
+                       q.getDescription() + "|" + q.getDateRequested() + "|" +
+                       serviceRequestStatusToString(q.getStatus()));
+    }
+    return rows;
+}
+
+// Persists a request in every status for the metric tests: 2 Pending,
+// 1 In Progress, 3 Completed, 1 Cancelled (7 total, 3 open).
+void persistMixedRequests(int residentId)
+{
+    using S = ServiceRequestStatus;
+    t13::persistRequest(residentId, "Barangay Clearance", "A", "2026-09-01", S::Pending);
+    t13::persistRequest(residentId, "Barangay Clearance", "B", "2026-09-02", S::Pending);
+    t13::persistRequest(residentId, "Barangay Clearance", "C", "2026-09-03", S::InProgress);
+    t13::persistRequest(residentId, "Barangay Clearance", "D", "2026-09-04", S::Completed);
+    t13::persistRequest(residentId, "Barangay Clearance", "E", "2026-09-05", S::Completed);
+    t13::persistRequest(residentId, "Barangay Clearance", "F", "2026-09-06", S::Completed);
+    t13::persistRequest(residentId, "Barangay Clearance", "G", "2026-09-07", S::Cancelled);
+}
+} // namespace t14
+
+// T14 Required Test 1: Dashboard Loads Successfully
+DROGON_TEST(T14DashboardLoadsSuccessfullyTest)
+{
+    t12::useFreshDatabase("t14_loads");
+
+    auto response = t14::dashboardPage();
+    REQUIRE(response != nullptr);
+    CHECK(response->statusCode() == k200OK);
+
+    const std::string body = t12::bodyOf(response);
+    CHECK(t12::contains(body, "<h1>CSMS Dashboard</h1>"));
+    CHECK(t12::contains(body, "Resident Summary"));
+    CHECK(t12::contains(body, "Service Request Summary"));
+    CHECK(t12::contains(body, "Recent Service Requests"));
+    CHECK(t12::contains(body, "Total Residents"));
+    CHECK(t12::contains(body, "Open Service Requests"));
+}
+
+// T14 Required Test 2: Empty Dashboard Displays Zero Counts
+DROGON_TEST(T14EmptyDashboardDisplaysZeroCountsTest)
+{
+    t12::useFreshDatabase("t14_empty");
+
+    const auto s = t14::summary();
+    CHECK(s.residents.total == 0);
+    CHECK(s.residents.active == 0);
+    CHECK(s.residents.inactive == 0);
+    CHECK(s.serviceRequests.total == 0);
+    CHECK(s.serviceRequests.pending == 0);
+    CHECK(s.serviceRequests.inProgress == 0);
+    CHECK(s.serviceRequests.completed == 0);
+    CHECK(s.serviceRequests.cancelled == 0);
+    CHECK(s.serviceRequests.open == 0);
+    CHECK(s.recentServiceRequests.empty());
+
+    // The same zeros are readable on the page, with a safe empty state.
+    auto response = t14::dashboardPage();
+    CHECK(response->statusCode() == k200OK);
+    const std::string body = t12::bodyOf(response);
+    CHECK(t12::contains(body, t14::card("Total Residents", 0)));
+    CHECK(t12::contains(body, t14::card("Active Residents", 0)));
+    CHECK(t12::contains(body, t14::card("Inactive Residents", 0)));
+    CHECK(t12::contains(body, t14::card("Total Service Requests", 0)));
+    CHECK(t12::contains(body, t14::card("Open Service Requests", 0)));
+    CHECK(t12::contains(body, t14::card("Pending", 0)));
+    CHECK(t12::contains(body, t14::card("In Progress", 0)));
+    CHECK(t12::contains(body, t14::card("Completed", 0)));
+    CHECK(t12::contains(body, t14::card("Cancelled", 0)));
+    CHECK(t12::contains(body, "No Service Requests available."));
+    CHECK(!t12::contains(body, "<table"));
+    CHECK(!t12::contains(body, "null"));
+}
+
+// T14 Required Test 3: Total Resident Count Is Correct
+DROGON_TEST(T14TotalResidentCountIsCorrectTest)
+{
+    t12::useFreshDatabase("t14_total_residents");
+    t12::persistResident("Maria", "Santos");
+    t12::persistResident("Juan", "Dela Cruz");
+    t12::persistResident("Ana", "Reyes");
+    t12::persistResident("Pedro", "Lopez", ResidentStatus::Inactive);
+
+    CHECK(t14::summary().residents.total == 4);
+    CHECK(t12::contains(t12::bodyOf(t14::dashboardPage()), t14::card("Total Residents", 4)));
+}
+
+// T14 Required Test 4: Resident Status Counts Are Correct
+DROGON_TEST(T14ResidentStatusCountsAreCorrectTest)
+{
+    t12::useFreshDatabase("t14_resident_status");
+    t12::persistResident("Maria", "Santos");
+    t12::persistResident("Juan", "Dela Cruz");
+    t12::persistResident("Ana", "Reyes");
+    t12::persistResident("Pedro", "Lopez", ResidentStatus::Inactive);
+    t12::persistResident("Rosa", "Garcia", ResidentStatus::Inactive);
+
+    const auto s = t14::summary();
+    CHECK(s.residents.active == 3);
+    CHECK(s.residents.inactive == 2);
+    CHECK(s.residents.total == s.residents.active + s.residents.inactive);
+
+    const std::string body = t12::bodyOf(t14::dashboardPage());
+    CHECK(t12::contains(body, t14::card("Total Residents", 5)));
+    CHECK(t12::contains(body, t14::card("Active Residents", 3)));
+    CHECK(t12::contains(body, t14::card("Inactive Residents", 2)));
+}
+
+// T14 Required Test 5: Total Service Request Count Is Correct
+DROGON_TEST(T14TotalServiceRequestCountIsCorrectTest)
+{
+    t12::useFreshDatabase("t14_total_requests");
+    const int residentId = t12::persistResident("Maria", "Santos");
+    t14::persistMixedRequests(residentId);
+
+    CHECK(t14::summary().serviceRequests.total == 7);
+    CHECK(t12::contains(t12::bodyOf(t14::dashboardPage()), t14::card("Total Service Requests", 7)));
+}
+
+// T14 Required Test 6: Service Request Status Counts Are Correct
+DROGON_TEST(T14ServiceRequestStatusCountsAreCorrectTest)
+{
+    t12::useFreshDatabase("t14_request_status");
+    const int residentId = t12::persistResident("Maria", "Santos");
+    t14::persistMixedRequests(residentId);
+
+    const auto s = t14::summary();
+    CHECK(s.serviceRequests.pending == 2);
+    CHECK(s.serviceRequests.inProgress == 1);
+    CHECK(s.serviceRequests.completed == 3);
+    CHECK(s.serviceRequests.cancelled == 1);
+
+    const std::string body = t12::bodyOf(t14::dashboardPage());
+    CHECK(t12::contains(body, t14::card("Pending", 2)));
+    CHECK(t12::contains(body, t14::card("In Progress", 1)));
+    CHECK(t12::contains(body, t14::card("Completed", 3)));
+    CHECK(t12::contains(body, t14::card("Cancelled", 1)));
+}
+
+// T14 Required Test 7: Service Request Counts Reconcile
+DROGON_TEST(T14ServiceRequestCountsReconcileTest)
+{
+    t12::useFreshDatabase("t14_reconcile");
+    const int residentId = t12::persistResident("Maria", "Santos");
+    t14::persistMixedRequests(residentId);
+
+    const auto s = t14::summary().serviceRequests;
+    CHECK(s.total == s.pending + s.inProgress + s.completed + s.cancelled);
+    CHECK(s.total == static_cast<int>(t13::requestCount()));
+}
+
+// T14 Required Test 8: Open Request Count Is Correct
+DROGON_TEST(T14OpenRequestCountIsCorrectTest)
+{
+    t12::useFreshDatabase("t14_open");
+    const int residentId = t12::persistResident("Maria", "Santos");
+
+    // Only terminal requests: nothing is open.
+    t13::persistRequest(residentId, "Barangay Clearance", "Done", "2026-09-01", ServiceRequestStatus::Completed);
+    t13::persistRequest(residentId, "Barangay Clearance", "Dropped", "2026-09-02", ServiceRequestStatus::Cancelled);
+    CHECK(t14::summary().serviceRequests.open == 0);
+
+    t14::persistMixedRequests(residentId); // adds 2 Pending + 1 In Progress
+    const auto s = t14::summary().serviceRequests;
+    CHECK(s.open == 3);
+    CHECK(s.open == s.pending + s.inProgress);
+    CHECK(s.open != s.completed + s.cancelled);
+    CHECK(t12::contains(t12::bodyOf(t14::dashboardPage()), t14::card("Open Service Requests", 3)));
+}
+
+// T14 Required Test 9: Resident Deactivation Is Reflected
+DROGON_TEST(T14ResidentDeactivationIsReflectedTest)
+{
+    t12::useFreshDatabase("t14_deactivation");
+    const int residentId = t12::persistResident("Maria", "Santos");
+    t12::persistResident("Juan", "Dela Cruz");
+
+    const auto before = t14::summary().residents;
+    CHECK(before.total == 2);
+    CHECK(before.active == 2);
+    CHECK(before.inactive == 0);
+
+    t14::deactivate(residentId);
+
+    const auto after = t14::summary().residents;
+    CHECK(after.total == before.total);
+    CHECK(after.active == before.active - 1);
+    CHECK(after.inactive == before.inactive + 1);
+
+    const std::string body = t12::bodyOf(t14::dashboardPage());
+    CHECK(t12::contains(body, t14::card("Total Residents", 2)));
+    CHECK(t12::contains(body, t14::card("Active Residents", 1)));
+    CHECK(t12::contains(body, t14::card("Inactive Residents", 1)));
+}
+
+// T14 Required Test 10: Service Request Transition Is Reflected
+DROGON_TEST(T14ServiceRequestTransitionIsReflectedTest)
+{
+    t12::useFreshDatabase("t14_transition");
+    const int residentId = t12::persistResident("Maria", "Santos");
+    const int id = t13::persistRequest(residentId, "Barangay Clearance", "A", "2026-09-01");
+    t13::persistRequest(residentId, "Barangay Clearance", "B", "2026-09-02");
+
+    const auto before = t14::summary().serviceRequests;
+    CHECK(before.pending == 2);
+    CHECK(before.inProgress == 0);
+
+    REQUIRE(ResidentServices::instance().status().changeStatus(id, "In Progress").success);
+
+    const auto after = t14::summary().serviceRequests;
+    CHECK(after.pending == before.pending - 1);
+    CHECK(after.inProgress == before.inProgress + 1);
+    CHECK(after.total == before.total);
+    CHECK(after.open == before.open); // Pending -> In Progress stays open
+
+    const std::string body = t12::bodyOf(t14::dashboardPage());
+    CHECK(t12::contains(body, t14::card("Pending", 1)));
+    CHECK(t12::contains(body, t14::card("In Progress", 1)));
+}
+
+// T14 Required Test 11: Terminal Transition Updates Open Count
+DROGON_TEST(T14TerminalTransitionUpdatesOpenCountTest)
+{
+    t12::useFreshDatabase("t14_terminal_transition");
+    const int residentId = t12::persistResident("Maria", "Santos");
+    const int toComplete = t13::persistRequest(residentId, "Barangay Clearance", "A", "2026-09-01",
+                                               ServiceRequestStatus::InProgress);
+    const int toCancel = t13::persistRequest(residentId, "Barangay Clearance", "B", "2026-09-02",
+                                             ServiceRequestStatus::InProgress);
+
+    const auto before = t14::summary().serviceRequests;
+    CHECK(before.open == 2);
+    CHECK(before.inProgress == 2);
+
+    REQUIRE(ResidentServices::instance().status().changeStatus(toComplete, "Completed").success);
+    const auto afterComplete = t14::summary().serviceRequests;
+    CHECK(afterComplete.inProgress == 1);
+    CHECK(afterComplete.completed == 1);
+    CHECK(afterComplete.open == 1);
+    CHECK(afterComplete.total == before.total);
+
+    REQUIRE(ResidentServices::instance().status().changeStatus(toCancel, "Cancelled").success);
+    const auto afterCancel = t14::summary().serviceRequests;
+    CHECK(afterCancel.inProgress == 0);
+    CHECK(afterCancel.cancelled == 1);
+    CHECK(afterCancel.open == 0);
+    CHECK(afterCancel.total == before.total);
+}
+
+// T14 Required Test 12: Recent Requests Return No More Than Five
+DROGON_TEST(T14RecentRequestsAreLimitedToFiveTest)
+{
+    t12::useFreshDatabase("t14_recent_limit");
+    const int residentId = t12::persistResident("Maria", "Santos");
+    for (int day = 1; day <= 8; ++day)
+    {
+        t13::persistRequest(residentId, "Barangay Clearance", "Request " + std::to_string(day),
+                            "2026-09-0" + std::to_string(day));
+    }
+
+    const auto s = t14::summary();
+    CHECK(s.recentServiceRequests.size() == 5);
+    CHECK(s.serviceRequests.total == 8); // the total is not capped
+
+    const std::string body = t12::bodyOf(t14::dashboardPage());
+    size_t viewLinks = 0;
+    for (size_t pos = body.find(">View</a>"); pos != std::string::npos; pos = body.find(">View</a>", pos + 1))
+    {
+        ++viewLinks;
+    }
+    CHECK(viewLinks == 5);
+}
+
+// With fewer than five requests, all of them are shown.
+DROGON_TEST(T14FewerThanFiveRequestsShowsAllTest)
+{
+    t12::useFreshDatabase("t14_recent_few");
+    const int residentId = t12::persistResident("Maria", "Santos");
+    t13::persistRequest(residentId, "Barangay Clearance", "A", "2026-09-01");
+    t13::persistRequest(residentId, "Barangay Clearance", "B", "2026-09-02");
+
+    CHECK(t14::summary().recentServiceRequests.size() == 2);
+}
+
+// T14 Required Test 13: Recent Requests Use Correct Ordering
+DROGON_TEST(T14RecentRequestsUseCorrectOrderingTest)
+{
+    t12::useFreshDatabase("t14_recent_order");
+    const int residentId = t12::persistResident("Maria", "Santos");
+
+    // Saved out of date order, with several sharing a date.
+    const int a = t13::persistRequest(residentId, "Barangay Clearance", "A", "2026-09-10");
+    const int b = t13::persistRequest(residentId, "Barangay Clearance", "B", "2026-09-20");
+    const int c = t13::persistRequest(residentId, "Barangay Clearance", "C", "2026-09-05");
+    const int d = t13::persistRequest(residentId, "Barangay Clearance", "D", "2026-09-20");
+    const int e = t13::persistRequest(residentId, "Barangay Clearance", "E", "2026-09-10");
+    const int f = t13::persistRequest(residentId, "Barangay Clearance", "F", "2026-09-20");
+    const int g = t13::persistRequest(residentId, "Barangay Clearance", "G", "2026-09-01");
+
+    // dateRequested DESC, then id DESC; the two oldest (c, g) fall outside the five.
+    const std::vector<int> expected = {f, d, b, e, a};
+    const auto s = t14::summary();
+    CHECK(t14::recentIds(s) == expected);
+    (void)c;
+    (void)g;
+
+    // The page lists them in the same order.
+    const std::string body = t12::bodyOf(t14::dashboardPage());
+    size_t last = 0;
+    for (int id : expected)
+    {
+        const size_t pos = body.find(t13::viewLink(id));
+        REQUIRE(pos != std::string::npos);
+        CHECK(pos > last);
+        last = pos;
+    }
+}
+
+// T14 Required Test 14: Terminal Requests May Appear in Recent Results
+DROGON_TEST(T14TerminalRequestsMayAppearInRecentResultsTest)
+{
+    t12::useFreshDatabase("t14_recent_terminal");
+    const int residentId = t12::persistResident("Maria", "Santos");
+    const int old = t13::persistRequest(residentId, "Barangay Clearance", "Old", "2026-09-01");
+    const int completed = t13::persistRequest(residentId, "Business Permit", "Done", "2026-09-10",
+                                              ServiceRequestStatus::Completed);
+    const int cancelled = t13::persistRequest(residentId, "Barangay Clearance", "Dropped", "2026-09-12",
+                                              ServiceRequestStatus::Cancelled);
+
+    CHECK(t14::recentIds(t14::summary()) == (std::vector<int>{cancelled, completed, old}));
+
+    const std::string body = t12::bodyOf(t14::dashboardPage());
+    CHECK(t12::contains(body, t13::viewLink(completed)));
+    CHECK(t12::contains(body, t13::viewLink(cancelled)));
+    CHECK(t12::contains(body, ">Completed</span>"));
+    CHECK(t12::contains(body, ">Cancelled</span>"));
+}
+
+// T14 Required Test 15: Dashboard GET Does Not Modify Persistence
+DROGON_TEST(T14DashboardGetDoesNotModifyPersistenceTest)
+{
+    t12::useFreshDatabase("t14_read_only");
+    const int active = t12::persistResident("Maria", "Santos");
+    t12::persistResident("Pedro", "Lopez", ResidentStatus::Inactive);
+    t14::persistMixedRequests(active);
+
+    const auto before = t14::snapshot();
+    REQUIRE(!before.empty());
+
+    for (int i = 0; i < 3; ++i)
+    {
+        CHECK(t14::dashboardPage()->statusCode() == k200OK);
+    }
+
+    CHECK(t14::snapshot() == before);
+    CHECK(t14::summary().serviceRequests.total == 7);
+    CHECK(t14::summary().residents.total == 2);
+}
+
+// The dashboard only answers GET; no dashboard route accepts a change.
+DROGON_TEST(T14DashboardRouteIsGetOnlyTest)
+{
+    const auto &binders = app().getHandlersInfo();
+    bool foundGet = false;
+    for (const auto &binder : binders)
+    {
+        if (std::get<0>(binder) != "/dashboard")
+        {
+            continue;
+        }
+        foundGet = foundGet || std::get<1>(binder) == Get;
+        CHECK(std::get<1>(binder) == Get);
+    }
+    CHECK(foundGet);
+}
+
+// Each recent request links to the existing T13 details page, which opens it.
+DROGON_TEST(T14RecentRequestViewOpensT13DetailsTest)
+{
+    t12::useFreshDatabase("t14_recent_view");
+    const int residentId = t12::persistResident("Maria", "Santos");
+    const int id = t13::persistRequest(residentId, "Barangay Clearance", "For employment.", "2026-09-15");
+
+    const std::string body = t12::bodyOf(t14::dashboardPage());
+    CHECK(t12::contains(body, t13::viewLink(id)));
+
+    auto details = t13::details(std::to_string(id));
+    CHECK(details->statusCode() == k200OK);
+    CHECK(t12::contains(t12::bodyOf(details), "For employment."));
+}
+
+// The recent table shows ID, Resident ID, Service Type, Date Requested, Status.
+DROGON_TEST(T14RecentRequestTableShowsRequiredColumnsTest)
+{
+    t12::useFreshDatabase("t14_recent_columns");
+    const int residentId = t12::persistResident("Maria", "Santos");
+    const int id = t13::persistRequest(residentId, "Barangay <Clearance>", "Secret details", "2026-09-15");
+
+    const std::string body = t12::bodyOf(t14::dashboardPage());
+    CHECK(t12::contains(body, "<th>ID</th>"));
+    CHECK(t12::contains(body, "<th>Resident ID</th>"));
+    CHECK(t12::contains(body, "<th>Service Type</th>"));
+    CHECK(t12::contains(body, "<th>Date Requested</th>"));
+    CHECK(t12::contains(body, "<th>Status</th>"));
+    CHECK(t12::contains(body, "<td>" + std::to_string(id) + "</td>"));
+    CHECK(t12::contains(body, "<td>" + std::to_string(residentId) + "</td>"));
+    CHECK(t12::contains(body, "2026-09-15"));
+    CHECK(t12::contains(body, ">Pending</span>"));
+    CHECK(t12::contains(body, "Barangay &lt;Clearance&gt;")); // user text is escaped
+    CHECK(!t12::contains(body, "<Clearance>"));
+    CHECK(!t12::contains(body, "Secret details")); // full description stays on the details page
+}
+
+// Navigation to the major modules is on the dashboard, and the Dashboard link
+// is part of the shared navigation on the other modules.
+DROGON_TEST(T14DashboardNavigationExistsTest)
+{
+    t12::useFreshDatabase("t14_navigation");
+    const int residentId = t12::persistResident("Maria", "Santos");
+    const int id = t13::persistRequest(residentId, "Barangay Clearance", "For work.", "2026-09-15");
+
+    const std::string dashboard = t12::bodyOf(t14::dashboardPage());
+    CHECK(t12::contains(dashboard, "<a href=\"/dashboard\""));
+    CHECK(t12::contains(dashboard, "<a href=\"/residents\""));
+    CHECK(t12::contains(dashboard, "<a href=\"/service-requests\""));
+    CHECK(t12::contains(dashboard, "Resident Management"));
+    CHECK(t12::contains(dashboard, "Service Request Management"));
+
+    const std::vector<std::string> pages = {t12::bodyOf(t12::listPage()),
+                                            t12::bodyOf(t12::registerForm()),
+                                            t12::bodyOf(t13::listPage()),
+                                            t12::bodyOf(t13::submitForm()),
+                                            t12::bodyOf(t13::details(std::to_string(id)))};
+    for (const auto &body : pages)
+    {
+        CHECK(t12::contains(body, "<a href=\"/dashboard\""));
+    }
+}
+
+// Repository level: the aggregate methods count in SQL and agree with the data.
+DROGON_TEST(T14ResidentRepositoryCountsTest)
+{
+    Database db(makeTempDbPath("t14_resident_counts"));
+    ResidentRepository repository(db);
+
+    CHECK(repository.countAll() == 0);
+    CHECK(repository.countByStatus(ResidentStatus::Active) == 0);
+    CHECK(repository.countByStatus(ResidentStatus::Inactive) == 0);
+
+    repository.save(Resident("Maria", "Santos", "12 Rizal Street", "09171234567", "maria@example.com",
+                             ResidentStatus::Active));
+    repository.save(Resident("Juan", "Cruz", "12 Rizal Street", "09171234567", "juan@example.com",
+                             ResidentStatus::Active));
+    repository.save(Resident("Pedro", "Lopez", "12 Rizal Street", "09171234567", "pedro@example.com",
+                             ResidentStatus::Inactive));
+
+    CHECK(repository.countAll() == 3);
+    CHECK(repository.countByStatus(ResidentStatus::Active) == 2);
+    CHECK(repository.countByStatus(ResidentStatus::Inactive) == 1);
+}
+
+DROGON_TEST(T14ServiceRequestRepositoryCountsTest)
+{
+    Database db(makeTempDbPath("t14_request_counts"));
+    ServiceRequestRepository repository(db);
+
+    CHECK(repository.countAll() == 0);
+    CHECK(repository.countByStatus(ServiceRequestStatus::Pending) == 0);
+
+    repository.save(ServiceRequest(1, "Barangay Clearance", "A", "2026-09-01", ServiceRequestStatus::Pending));
+    repository.save(ServiceRequest(1, "Barangay Clearance", "B", "2026-09-02", ServiceRequestStatus::Pending));
+    repository.save(ServiceRequest(1, "Barangay Clearance", "C", "2026-09-03", ServiceRequestStatus::Completed));
+    repository.save(ServiceRequest(1, "Barangay Clearance", "D", "2026-09-04", ServiceRequestStatus::Cancelled));
+
+    CHECK(repository.countAll() == 4);
+    CHECK(repository.countByStatus(ServiceRequestStatus::Pending) == 2);
+    CHECK(repository.countByStatus(ServiceRequestStatus::InProgress) == 0);
+    CHECK(repository.countByStatus(ServiceRequestStatus::Completed) == 1);
+    CHECK(repository.countByStatus(ServiceRequestStatus::Cancelled) == 1);
+}
+
+// findRecent is the T11 ordering with a LIMIT, and a non-positive limit
+// returns nothing rather than SQLite's "negative means unlimited".
+DROGON_TEST(T14FindRecentRespectsLimitAndOrderingTest)
+{
+    Database db(makeTempDbPath("t14_find_recent"));
+    ServiceRequestRepository repository(db);
+
+    std::vector<int> ids;
+    for (int day = 1; day <= 4; ++day)
+    {
+        ids.push_back(repository.save(ServiceRequest(1, "Barangay Clearance", "R", "2026-09-0" + std::to_string(day)))
+                          .getId().value());
+    }
+
+    CHECK(idsOf(repository.findRecent(2)) == (std::vector<int>{ids[3], ids[2]}));
+    CHECK(idsOf(repository.findRecent(10)) == idsOf(repository.findAll()));
+    CHECK(repository.findRecent(0).empty());
+    CHECK(repository.findRecent(-1).empty());
+    CHECK(repository.countAll() == 4);
 }
 
 // Keeping the original starter test so existing behavior is preserved.

@@ -295,3 +295,48 @@ bool ResidentRepository::deactivateById(int residentId)
 
     return sqlite3_changes(database_.handle()) > 0;
 }
+
+int ResidentRepository::readCount(sqlite3_stmt *statement, const char *what) const
+{
+    // COUNT(*) always yields exactly one row, even over an empty table.
+    if (sqlite3_step(statement) != SQLITE_ROW)
+    {
+        std::string errorMessage = sqlite3_errmsg(database_.handle());
+        sqlite3_finalize(statement);
+        throw std::runtime_error(std::string("Failed to count ") + what + ": " + errorMessage);
+    }
+
+    int count = sqlite3_column_int(statement, 0);
+    sqlite3_finalize(statement);
+    return count;
+}
+
+int ResidentRepository::countAll()
+{
+    const char *sql = "SELECT COUNT(*) FROM residents;";
+
+    sqlite3_stmt *statement = nullptr;
+    if (sqlite3_prepare_v2(database_.handle(), sql, -1, &statement, nullptr) != SQLITE_OK)
+    {
+        throw std::runtime_error("Failed to prepare Resident count: " +
+                                  std::string(sqlite3_errmsg(database_.handle())));
+    }
+
+    return readCount(statement, "Residents");
+}
+
+int ResidentRepository::countByStatus(ResidentStatus status)
+{
+    const char *sql = "SELECT COUNT(*) FROM residents WHERE status = ?;";
+
+    sqlite3_stmt *statement = nullptr;
+    if (sqlite3_prepare_v2(database_.handle(), sql, -1, &statement, nullptr) != SQLITE_OK)
+    {
+        throw std::runtime_error("Failed to prepare Resident status count: " +
+                                  std::string(sqlite3_errmsg(database_.handle())));
+    }
+
+    sqlite3_bind_text(statement, 1, residentStatusToString(status).c_str(), -1, SQLITE_TRANSIENT);
+
+    return readCount(statement, "Residents by status");
+}
