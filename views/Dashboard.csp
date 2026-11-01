@@ -1,0 +1,109 @@
+<%inc
+#include <memory>
+#include "services/DashboardSummary.h"
+#include "views/ServiceRequestLayout.h"
+%>
+<%c++
+// HttpViewData::get<T> needs a default-constructible T; the summary is shared
+// by pointer like the other views' non-default-constructible models.
+const auto &summary = *@@.get<std::shared_ptr<DashboardSummary>>("summary");
+const auto &residents = summary.residents;
+const auto &requests = summary.serviceRequests;
+const auto &recent = summary.recentServiceRequests;
+
+// One summary card. Label and number are both printed as text.
+auto stat = [&](const std::string &label, int value, bool highlight = false, const std::string &note = "") {
+    $$ << "<div class=\"stat" << (highlight ? " highlight" : "") << "\">"
+       << "<div class=\"stat-label\">" << h(label) << "</div>"
+       << "<div class=\"stat-value\">" << value << "</div>";
+    if (!note.empty())
+    {
+        $$ << "<div class=\"stat-note\">" << h(note) << "</div>";
+    }
+    $$ << "</div>";
+};
+%>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CSMS Dashboard - CSMS</title>
+    <style><%c++ $$ << residentPageStyles(); %></style>
+</head>
+<body>
+<%c++ $$ << navigationBar("dashboard"); %>
+<main>
+    <h1>CSMS Dashboard</h1>
+
+    <section class="dashboard-section" aria-labelledby="resident-summary">
+        <h2 id="resident-summary">Resident Summary</h2>
+        <div class="stats">
+            <%c++
+            stat("Total Residents", residents.total);
+            stat("Active Residents", residents.active);
+            stat("Inactive Residents", residents.inactive);
+            %>
+        </div>
+    </section>
+
+    <section class="dashboard-section" aria-labelledby="request-summary">
+        <h2 id="request-summary">Service Request Summary</h2>
+        <div class="stats">
+            <%c++
+            stat("Total Service Requests", requests.total);
+            stat("Open Service Requests", requests.open, true, "Pending + In Progress");
+            stat("Pending", requests.pending);
+            stat("In Progress", requests.inProgress);
+            stat("Completed", requests.completed);
+            stat("Cancelled", requests.cancelled);
+            %>
+        </div>
+    </section>
+
+    <section class="dashboard-section" aria-labelledby="recent-requests">
+        <h2 id="recent-requests">Recent Service Requests</h2>
+        <%c++ if (recent.empty()) { %>
+        <p class="empty">No Service Requests available.</p>
+        <%c++ } else { %>
+        <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>Resident ID</th>
+                    <th>Service Type</th>
+                    <th>Date Requested</th>
+                    <th>Status</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+            <%c++ for (const auto &request : recent) {
+                const std::string id = std::to_string(request.getId().value_or(0));
+            %>
+                <tr>
+                    <td><%c++ $$ << id; %></td>
+                    <td><%c++ $$ << request.getResidentId(); %></td>
+                    <td><%c++ $$ << h(request.getServiceType()); %></td>
+                    <td><%c++ $$ << h(request.getDateRequested()); %></td>
+                    <td><%c++ $$ << statusBadge(request.getStatus()); %></td>
+                    <td><a href="/service-requests/<%c++ $$ << id; %>">View</a></td>
+                </tr>
+            <%c++ } %>
+            </tbody>
+        </table>
+        </div>
+        <%c++ } %>
+    </section>
+
+    <section class="dashboard-section" aria-labelledby="modules">
+        <h2 id="modules">Modules</h2>
+        <div class="module-links">
+            <a class="button" href="/residents">Resident Management</a>
+            <a class="button" href="/service-requests">Service Request Management</a>
+        </div>
+    </section>
+</main>
+</body>
+</html>
