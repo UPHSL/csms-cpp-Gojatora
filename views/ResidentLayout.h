@@ -67,10 +67,20 @@ inline const char *residentPageStyles()
         .readonly span { font-weight: 700; }
         .form-actions { display: flex; gap: 10px; margin-top: 20px; }
         .empty { padding: 16px 0; color: #444; }
+        .dashboard-section { margin-bottom: 28px; }
+        .dashboard-section h2 { margin: 0 0 12px; font-size: 1.25rem; }
+        .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+        .stat { background: #f6f7f8; border: 1px solid #d9dde3; border-radius: 10px; padding: 14px 16px; }
+        .stat.highlight { border-color: #1a56b0; background: #eef4fc; }
+        .stat .stat-label { font-weight: 700; font-size: 0.95rem; }
+        .stat .stat-value { font-size: 2rem; font-weight: 700; line-height: 1.2; }
+        .stat .stat-note { color: #555; font-size: 0.85rem; }
+        .module-links { display: flex; flex-wrap: wrap; gap: 8px; }
     )CSS";
 }
 
-// The shared top navigation. `current` is "residents" or "service-requests".
+// The shared top navigation. `current` is "dashboard", "residents" or
+// "service-requests".
 inline std::string navigationBar(const std::string &current)
 {
     auto link = [&](const char *key, const char *href, const char *label) {
@@ -78,6 +88,7 @@ inline std::string navigationBar(const std::string &current)
                (current == key ? " class=\"current\"" : "") + ">" + label + "</a>";
     };
     return "<nav class=\"site-nav\" aria-label=\"Main\">" +
+           link("dashboard", "/dashboard", "Dashboard") +
            link("residents", "/residents", "Residents") +
            link("service-requests", "/service-requests", "Service Requests") + "</nav>";
 }

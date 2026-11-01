@@ -38,6 +38,12 @@ public:
     // (whether it was Active or already Inactive), false if no such id.
     bool deactivateById(int residentId);
 
+    // Aggregate (reporting) queries for the dashboard (T14). SQLite does the
+    // counting with COUNT(*); no Resident objects are loaded. Read-only.
+    // Inactive Residents are still persisted, so countAll() includes them.
+    int countAll();
+    int countByStatus(ResidentStatus status);
+
 private:
     Database &database_;
 
@@ -46,6 +52,10 @@ private:
     ResidentStatus statusFromString(const std::string &value) const;
 
     Resident mapRowToResident(sqlite3_stmt *statement) const;
+
+    // Steps a prepared "SELECT COUNT(*) ..." statement, returns its single
+    // value, and finalizes the statement.
+    int readCount(sqlite3_stmt *statement, const char *what) const;
 };
 
 

@@ -8,6 +8,7 @@
 #include "../models/ServiceRequestValidator.h"
 #include "../repositories/ResidentRepository.h"
 #include "../repositories/ServiceRequestRepository.h"
+#include "DashboardService.h"
 #include "ResidentDeactivationService.h"
 #include "ResidentRegistrationService.h"
 #include "ResidentSearchService.h"
@@ -43,6 +44,8 @@ public:
     ServiceRequestStatusService &status() { return status_; }
     ServiceRequestQueryService &query() { return query_; }
 
+    DashboardService &dashboard() { return dashboard_; }
+
 private:
     explicit ResidentServices(const std::string &dbPath);
 
@@ -58,4 +61,5 @@ private:
     ServiceRequestSubmissionService submission_;
     ServiceRequestStatusService status_;
     ServiceRequestQueryService query_;
+    DashboardService dashboard_;
 };

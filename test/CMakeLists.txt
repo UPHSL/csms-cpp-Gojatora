@@ -17,9 +17,11 @@ add_executable(${PROJECT_NAME}
     ../services/ResidentServices.cc
     ../controllers/ResidentController.cc
     ../controllers/ServiceRequestController.cc
+    ../controllers/DashboardController.cc
     ../services/ServiceRequestSubmissionService.cc
     ../services/ServiceRequestStatusService.cc
     ../services/ServiceRequestQueryService.cc
+    ../services/DashboardService.cc
 )
 
 target_include_directories(${PROJECT_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_SOURCE_DIR}/../models)
