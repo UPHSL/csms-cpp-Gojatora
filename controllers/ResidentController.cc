@@ -1,11 +1,11 @@
 #include "ResidentController.h"
 
-#include <cctype>
 #include <map>
 #include <string>
 #include <vector>
 
 #include "../services/ResidentServices.h"
+#include "ControllerSupport.h"
 
 namespace
 {
@@ -61,40 +61,9 @@ FieldMap valuesOf(const Resident &resident)
                     {"email", resident.getEmail()}};
 }
 
-// Parses a path segment as a positive id. Anything else (letters, "-1",
-// overflow) cannot name a Resident, so it is treated as not found.
-bool parseId(const std::string &text, int &id)
-{
-    if (text.empty() || text.size() > 9)
-    {
-        return false;
-    }
-    for (unsigned char c : text)
-    {
-        if (!std::isdigit(c))
-        {
-            return false;
-        }
-    }
-    id = std::stoi(text);
-    return id > 0;
-}
-
-HttpResponsePtr render(const char *view, HttpViewData &data, HttpStatusCode status = k200OK)
-{
-    auto response = HttpResponse::newHttpViewResponse(view, data);
-    response->setStatusCode(status);
-    return response;
-}
-
-// 303 See Other: the browser follows the redirect with a GET, so a refresh
-// of the resulting page cannot re-submit the form.
-HttpResponsePtr redirectTo(const std::string &url)
-{
-    auto response = HttpResponse::newRedirectionResponse(url);
-    response->setStatusCode(k303SeeOther);
-    return response;
-}
+using controller_support::parseId;
+using controller_support::redirectTo;
+using controller_support::render;
 
 HttpResponsePtr notFoundPage()
 {

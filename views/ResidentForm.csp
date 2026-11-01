@@ -42,6 +42,7 @@ auto field = [&](const std::string &name, const std::string &label, const std::s
     <style><%c++ $$ << residentPageStyles(); %></style>
 </head>
 <body>
+<%c++ $$ << navigationBar("residents"); %>
 <main>
     <h1><%c++ $$ << h(pageTitle); %></h1>
 

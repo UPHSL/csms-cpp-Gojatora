@@ -17,7 +17,11 @@ ResidentServices::ResidentServices(const std::string &dbPath)
       registration_(validator_, repository_),
       search_(repository_),
       update_(validator_, repository_),
-      deactivation_(repository_)
+      deactivation_(repository_),
+      serviceRequestRepository_(database_),
+      submission_(serviceRequestValidator_, repository_, serviceRequestRepository_),
+      status_(serviceRequestRepository_),
+      query_(serviceRequestRepository_)
 {
 }
 

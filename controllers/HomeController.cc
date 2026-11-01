@@ -108,7 +108,7 @@ void HomeController::asyncHandleHttpRequest(
         </section>
 
         <p class="status">Environment status: Ready</p>
-        <p><a href="/residents">Resident Management</a></p>
+        <p><a href="/residents">Resident Management</a> | <a href="/service-requests">Service Request Management</a></p>
     </main>
 </body>
 </html>

@@ -5,16 +5,22 @@
 
 #include "../database/Database.h"
 #include "../models/ResidentValidator.h"
+#include "../models/ServiceRequestValidator.h"
 #include "../repositories/ResidentRepository.h"
+#include "../repositories/ServiceRequestRepository.h"
 #include "ResidentDeactivationService.h"
 #include "ResidentRegistrationService.h"
 #include "ResidentSearchService.h"
 #include "ResidentUpdateService.h"
+#include "ServiceRequestQueryService.h"
+#include "ServiceRequestStatusService.h"
+#include "ServiceRequestSubmissionService.h"
 
-// Wires the existing Resident validator, repository, and application
-// services together once, so the presentation layer (which Drogon
-// constructs itself and therefore cannot receive constructor arguments)
-// can reach them. It adds no behavior of its own.
+// Wires the existing Resident (T04-T07) and Service Request (T09-T11)
+// validators, repositories, and application services together once, over a
+// single shared database, so the presentation layer (which Drogon constructs
+// itself and therefore cannot receive constructor arguments) can reach them.
+// It adds no behavior of its own.
 class ResidentServices
 {
 public:
@@ -32,6 +38,11 @@ public:
     ResidentUpdateService &update() { return update_; }
     ResidentDeactivationService &deactivation() { return deactivation_; }
 
+    ServiceRequestRepository &serviceRequestRepository() { return serviceRequestRepository_; }
+    ServiceRequestSubmissionService &submission() { return submission_; }
+    ServiceRequestStatusService &status() { return status_; }
+    ServiceRequestQueryService &query() { return query_; }
+
 private:
     explicit ResidentServices(const std::string &dbPath);
 
@@ -42,4 +53,9 @@ private:
     ResidentSearchService search_;
     ResidentUpdateService update_;
     ResidentDeactivationService deactivation_;
+    ServiceRequestValidator serviceRequestValidator_;
+    ServiceRequestRepository serviceRequestRepository_;
+    ServiceRequestSubmissionService submission_;
+    ServiceRequestStatusService status_;
+    ServiceRequestQueryService query_;
 };

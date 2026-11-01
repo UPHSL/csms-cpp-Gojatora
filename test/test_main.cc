@@ -22,6 +22,7 @@
 #include "../services/ResidentServices.h"
 
 #include "../controllers/ResidentController.h"
+#include "../controllers/ServiceRequestController.h"
 
 #include <algorithm>
 #include <map>
@@ -3196,6 +3197,847 @@ DROGON_TEST(T12UnknownFlashCodeIsIgnoredTest)
 
     CHECK(!t12::contains(body, "hacked"));
     CHECK(!t12::contains(body, "class=\"message success\""));
+}
+
+// ---------------------------------------------------------------------------
+// T13 - Service Request Management Interface (presentation/integration tests)
+//
+// These tests drive ServiceRequestController with real HttpRequest objects, so
+// the whole path is exercised: controller -> T09 submission / T10 status /
+// T11 query services -> validator -> repositories -> SQLite -> rendered view.
+// ResidentServices is pointed at a throwaway database file. Residents and
+// Service Requests are persisted through the existing application services
+// (never by raw SQL), and non-Pending requests are reached by walking the
+// legitimate T10 transitions.
+// ---------------------------------------------------------------------------
+
+namespace t13
+{
+using Params = t12::Params;
+
+HttpResponsePtr listPage(const Params &params = {})
+{
+    HttpResponsePtr response;
+    ServiceRequestController().list(t12::makeRequest(Get, params),
+                                    [&](const HttpResponsePtr &r) { response = r; });
+    return response;
+}
+
+HttpResponsePtr submitForm()
+{
+    HttpResponsePtr response;
+    ServiceRequestController().showSubmitForm(t12::makeRequest(Get, {}),
+                                              [&](const HttpResponsePtr &r) { response = r; });
+    return response;
+}
+
+HttpResponsePtr submit(const Params &params)
+{
+    HttpResponsePtr response;
+    ServiceRequestController().submit(t12::makeRequest(Post, params),
+                                      [&](const HttpResponsePtr &r) { response = r; });
+    return response;
+}
+
+HttpResponsePtr details(const std::string &id, const Params &params = {})
+{
+    HttpResponsePtr response;
+    ServiceRequestController().show(t12::makeRequest(Get, params),
+                                    [&](const HttpResponsePtr &r) { response = r; },
+                                    id);
+    return response;
+}
+
+HttpResponsePtr start(const std::string &id)
+{
+    HttpResponsePtr response;
+    ServiceRequestController().startProcessing(t12::makeRequest(Post, {}),
+                                               [&](const HttpResponsePtr &r) { response = r; },
+                                               id);
+    return response;
+}
+
+HttpResponsePtr complete(const std::string &id)
+{
+    HttpResponsePtr response;
+    ServiceRequestController().complete(t12::makeRequest(Post, {}),
+                                        [&](const HttpResponsePtr &r) { response = r; },
+                                        id);
+    return response;
+}
+
+HttpResponsePtr cancel(const std::string &id)
+{
+    HttpResponsePtr response;
+    ServiceRequestController().cancel(t12::makeRequest(Post, {}),
+                                      [&](const HttpResponsePtr &r) { response = r; },
+                                      id);
+    return response;
+}
+
+Params validForm(int residentId,
+                 const std::string &serviceType = "Barangay Clearance",
+                 const std::string &description = "Requesting barangay clearance for employment.",
+                 const std::string &dateRequested = "2026-09-15")
+{
+    return {{"residentId", std::to_string(residentId)},
+            {"serviceType", serviceType},
+            {"description", description},
+            {"dateRequested", dateRequested}};
+}
+
+// Persists a request through T09, then walks legitimate T10 transitions to
+// reach the wanted status. Returns the generated id.
+int persistRequest(int residentId,
+                   const std::string &serviceType,
+                   const std::string &description,
+                   const std::string &dateRequested,
+                   ServiceRequestStatus status = ServiceRequestStatus::Pending)
+{
+    auto &services = ResidentServices::instance();
+    const auto submitted = services.submission().submitServiceRequest(
+        ServiceRequest(residentId, serviceType, description, dateRequested));
+    const int id = submitted.serviceRequest->getId().value();
+
+    switch (status)
+    {
+        case ServiceRequestStatus::Pending:
+            break;
+        case ServiceRequestStatus::InProgress:
+            services.status().changeStatus(id, "In Progress");
+            break;
+        case ServiceRequestStatus::Completed:
+            services.status().changeStatus(id, "In Progress");
+            services.status().changeStatus(id, "Completed");
+            break;
+        case ServiceRequestStatus::Cancelled:
+            services.status().changeStatus(id, "Cancelled");
+            break;
+    }
+    return id;
+}
+
+ServiceRequest persisted(int id)
+{
+    return ResidentServices::instance().serviceRequestRepository().findById(id).value();
+}
+
+std::string statusOf(int id)
+{
+    return serviceRequestStatusToString(persisted(id).getStatus());
+}
+
+size_t requestCount()
+{
+    return ResidentServices::instance().serviceRequestRepository().findAll().size();
+}
+
+// The marker the list and details pages use for "View" links.
+std::string viewLink(int id)
+{
+    return "href=\"/service-requests/" + std::to_string(id) + "\">View</a>";
+}
+
+std::string actionPath(int id, const std::string &action)
+{
+    return "action=\"/service-requests/" + std::to_string(id) + "/" + action + "\"";
+}
+} // namespace t13
+
+// T13 Required Test 1: Service Request Management Page Loads
+DROGON_TEST(T13ServiceRequestManagementPageLoadsTest)
+{
+    t12::useFreshDatabase("t13_page_loads");
+
+    auto response = t13::listPage();
+    REQUIRE(response != nullptr);
+    CHECK(response->statusCode() == k200OK);
+
+    const std::string body = t12::bodyOf(response);
+    CHECK(t12::contains(body, "<h1>Service Request Management</h1>"));
+    CHECK(t12::contains(body, "Submit Service Request"));
+    CHECK(t12::contains(body, "href=\"/service-requests/new\""));
+    CHECK(t12::contains(body, "name=\"q\""));
+    CHECK(t12::contains(body, "name=\"status\""));
+    CHECK(t12::contains(body, ">All Statuses</option>"));
+    CHECK(t12::contains(body, ">Pending</option>"));
+    CHECK(t12::contains(body, ">In Progress</option>"));
+    CHECK(t12::contains(body, ">Completed</option>"));
+    CHECK(t12::contains(body, ">Cancelled</option>"));
+    CHECK(t12::contains(body, ">Search</button>"));
+}
+
+// An empty database must render a friendly message, not an error or "null".
+DROGON_TEST(T13EmptyServiceRequestListRendersMessageTest)
+{
+    t12::useFreshDatabase("t13_empty");
+
+    auto response = t13::listPage();
+    CHECK(response->statusCode() == k200OK);
+
+    const std::string body = t12::bodyOf(response);
+    CHECK(t12::contains(body, "No Service Requests found."));
+    CHECK(!t12::contains(body, "null"));
+    CHECK(!t12::contains(body, "<table"));
+}
+
+// T13 Required Test 2: Persisted Service Requests Are Displayed
+DROGON_TEST(T13PersistedServiceRequestsAreDisplayedTest)
+{
+    t12::useFreshDatabase("t13_displays");
+    const int residentId = t12::persistResident("Maria", "Santos");
+    const int first = t13::persistRequest(residentId, "Barangay Clearance", "For employment.", "2026-09-10");
+    const int second = t13::persistRequest(residentId, "Business Permit", "Open a small store.", "2026-09-12");
+
+    const std::string body = t12::bodyOf(t13::listPage());
+
+    CHECK(t12::contains(body, t13::viewLink(first)));
+    CHECK(t12::contains(body, t13::viewLink(second)));
+    CHECK(t12::contains(body, "<th>ID</th>"));
+    CHECK(t12::contains(body, "<th>Resident ID</th>"));
+    CHECK(t12::contains(body, "<th>Service Type</th>"));
+    CHECK(t12::contains(body, "<th>Date Requested</th>"));
+    CHECK(t12::contains(body, "<th>Status</th>"));
+    CHECK(t12::contains(body, "Barangay Clearance"));
+    CHECK(t12::contains(body, "Business Permit"));
+    CHECK(t12::contains(body, "2026-09-10"));
+    CHECK(t12::contains(body, "2026-09-12"));
+    CHECK(t12::contains(body, "<td>" + std::to_string(residentId) + "</td>"));
+    CHECK(t12::contains(body, ">Pending</span>"));
+}
+
+// T13 Required Test 3: Required Ordering (dateRequested DESC, id DESC) Is Preserved
+DROGON_TEST(T13ListingKeepsT11OrderingTest)
+{
+    t12::useFreshDatabase("t13_ordering");
+    const int residentId = t12::persistResident("Maria", "Santos");
+    // Inserted in an order that differs from the required result.
+    const int oldest = t13::persistRequest(residentId, "Type A", "Oldest.", "2026-01-01");
+    const int newestLowId = t13::persistRequest(residentId, "Type B", "Newest, lower id.", "2026-09-30");
+    const int middle = t13::persistRequest(residentId, "Type C", "Middle.", "2026-05-05");
+    const int newestHighId = t13::persistRequest(residentId, "Type D", "Newest, higher id.", "2026-09-30");
+
+    const std::string body = t12::bodyOf(t13::listPage());
+    auto position = [&](int id) { return body.find(t13::viewLink(id)); };
+
+    // Expected: newestHighId, newestLowId (same date, id DESC), middle, oldest.
+    REQUIRE(position(newestHighId) != std::string::npos);
+    CHECK(position(newestHighId) < position(newestLowId));
+    CHECK(position(newestLowId) < position(middle));
+    CHECK(position(middle) < position(oldest));
+}
+
+// T13 Required Test 4: Text Search Uses T11 Behavior
+DROGON_TEST(T13TextSearchUsesT11BehaviorTest)
+{
+    t12::useFreshDatabase("t13_search");
+    const int residentId = t12::persistResident("Maria", "Santos");
+    const int clearance = t13::persistRequest(residentId,
+                                              "Barangay Clearance",
+                                              "Requesting barangay clearance for employment requirements.",
+                                              "2026-09-10");
+    const int permit = t13::persistRequest(residentId, "Business Permit", "Open a small store.", "2026-09-11");
+
+    // Partial + case-insensitive on serviceType.
+    std::string body = t12::bodyOf(t13::listPage({{"q", "CLEAR"}}));
+    CHECK(t12::contains(body, t13::viewLink(clearance)));
+    CHECK(!t12::contains(body, t13::viewLink(permit)));
+
+    // Partial + case-insensitive on description only.
+    body = t12::bodyOf(t13::listPage({{"q", "Employ"}}));
+    CHECK(t12::contains(body, t13::viewLink(clearance)));
+    CHECK(!t12::contains(body, t13::viewLink(permit)));
+
+    // Leading and trailing whitespace is trimmed.
+    body = t12::bodyOf(t13::listPage({{"q", "   permit   "}}));
+    CHECK(t12::contains(body, t13::viewLink(permit)));
+    CHECK(!t12::contains(body, t13::viewLink(clearance)));
+
+    // The search term stays visible in the box.
+    CHECK(t12::contains(body, "value=\"   permit   \""));
+}
+
+DROGON_TEST(T13BlankSearchAndNoMatchAreHandledSafelyTest)
+{
+    t12::useFreshDatabase("t13_blank_nomatch");
+    const int residentId = t12::persistResident("Maria", "Santos");
+    const int id = t13::persistRequest(residentId, "Barangay Clearance", "For work.", "2026-09-10");
+
+    for (const std::string blank : {"", " ", "      "})
+    {
+        auto response = t13::listPage({{"q", blank}});
+        CHECK(response->statusCode() == k200OK);
+        CHECK(t12::contains(t12::bodyOf(response), t13::viewLink(id)));
+    }
+
+    auto response = t13::listPage({{"q", "zzzznomatch"}});
+    CHECK(response->statusCode() == k200OK);
+    const std::string body = t12::bodyOf(response);
+    CHECK(t12::contains(body, "No Service Requests found."));
+    CHECK(!t12::contains(body, t13::viewLink(id)));
+}
+
+// T13 Required Test 5: Status Filter Uses T11 Behavior
+DROGON_TEST(T13StatusFilterUsesT11BehaviorTest)
+{
+    t12::useFreshDatabase("t13_status_filter");
+    const int residentId = t12::persistResident("Maria", "Santos");
+    const int pending = t13::persistRequest(residentId, "Type P", "Pending one.", "2026-09-01");
+    const int inProgress = t13::persistRequest(residentId, "Type I", "In progress one.", "2026-09-02",
+                                               ServiceRequestStatus::InProgress);
+    const int completed = t13::persistRequest(residentId, "Type C", "Completed one.", "2026-09-03",
+                                              ServiceRequestStatus::Completed);
+    const int cancelled = t13::persistRequest(residentId, "Type X", "Cancelled one.", "2026-09-04",
+                                              ServiceRequestStatus::Cancelled);
+    const std::map<std::string, int> expected = {{"Pending", pending},
+                                                 {"In Progress", inProgress},
+                                                 {"Completed", completed},
+                                                 {"Cancelled", cancelled}};
+
+    for (const auto &wanted : expected)
+    {
+        const std::string body = t12::bodyOf(t13::listPage({{"status", wanted.first}}));
+        for (const auto &other : expected)
+        {
+            CHECK(t12::contains(body, t13::viewLink(other.second)) == (other.first == wanted.first));
+        }
+        // The chosen status stays selected.
+        CHECK(t12::contains(body, "<option value=\"" + wanted.first + "\" selected>"));
+    }
+
+    // "All Statuses" is the blank value and shows everything.
+    const std::string all = t12::bodyOf(t13::listPage({{"status", ""}}));
+    for (const auto &entry : expected)
+    {
+        CHECK(t12::contains(all, t13::viewLink(entry.second)));
+    }
+}
+
+// T13 Required Test 6: Combined Search and Status Filter Works (AND)
+DROGON_TEST(T13CombinedSearchAndStatusFilterTest)
+{
+    t12::useFreshDatabase("t13_combined");
+    const int residentId = t12::persistResident("Maria", "Santos");
+    const int bothMatch = t13::persistRequest(residentId, "Barangay Clearance", "Pending clearance.", "2026-09-01");
+    const int textOnly = t13::persistRequest(residentId, "Barangay Clearance", "Done clearance.", "2026-09-02",
+                                             ServiceRequestStatus::Completed);
+    const int statusOnly = t13::persistRequest(residentId, "Business Permit", "Pending permit.", "2026-09-03");
+    const int neither = t13::persistRequest(residentId, "Business Permit", "Done permit.", "2026-09-04",
+                                            ServiceRequestStatus::Completed);
+
+    const std::string body = t12::bodyOf(t13::listPage({{"q", "clearance"}, {"status", "Pending"}}));
+
+    CHECK(t12::contains(body, t13::viewLink(bothMatch)));
+    CHECK(!t12::contains(body, t13::viewLink(textOnly)));
+    CHECK(!t12::contains(body, t13::viewLink(statusOnly)));
+    CHECK(!t12::contains(body, t13::viewLink(neither)));
+    CHECK(t12::contains(body, "value=\"clearance\""));
+    CHECK(t12::contains(body, "<option value=\"Pending\" selected>"));
+}
+
+// A hand-typed unsupported status is reported, not silently ignored.
+DROGON_TEST(T13UnsupportedStatusFilterIsReportedTest)
+{
+    t12::useFreshDatabase("t13_bad_status");
+    const int residentId = t12::persistResident("Maria", "Santos");
+    const int id = t13::persistRequest(residentId, "Barangay Clearance", "For work.", "2026-09-10");
+
+    auto response = t13::listPage({{"status", "Approved"}});
+    CHECK(response->statusCode() == k400BadRequest);
+
+    const std::string body = t12::bodyOf(response);
+    CHECK(t12::contains(body, "Unsupported status filter."));
+    CHECK(!t12::contains(body, t13::viewLink(id)));
+}
+
+// T13 Required Test 7: Submission Form Is Accessible
+DROGON_TEST(T13SubmissionFormIsAccessibleTest)
+{
+    t12::useFreshDatabase("t13_form");
+
+    auto response = t13::submitForm();
+    CHECK(response->statusCode() == k200OK);
+
+    const std::string body = t12::bodyOf(response);
+    CHECK(t12::contains(body, "name=\"residentId\""));
+    CHECK(t12::contains(body, "name=\"serviceType\""));
+    CHECK(t12::contains(body, "<textarea id=\"description\" name=\"description\""));
+    CHECK(t12::contains(body, "type=\"date\" id=\"dateRequested\" name=\"dateRequested\""));
+    CHECK(t12::contains(body, "<label for=\"residentId\">Resident ID</label>"));
+    CHECK(t12::contains(body, "<label for=\"serviceType\">Service Type</label>"));
+    CHECK(t12::contains(body, "<label for=\"description\">Description</label>"));
+    CHECK(t12::contains(body, "<label for=\"dateRequested\">Date Requested</label>"));
+    CHECK(t12::contains(body, "method=\"post\" action=\"/service-requests/new\""));
+    CHECK(t12::contains(body, "href=\"/residents\">View Residents</a>"));
+
+    // No Service Request ID and no initial status for the user to supply.
+    CHECK(!t12::contains(body, "name=\"id\""));
+    CHECK(!t12::contains(body, "name=\"status\""));
+    CHECK(!t12::contains(body, "<select"));
+}
+
+// T13 Required Test 8: Valid Submission Persists a Pending Request
+DROGON_TEST(T13ValidSubmissionPersistsPendingRequestTest)
+{
+    t12::useFreshDatabase("t13_valid_submit");
+    const int residentId = t12::persistResident("Maria", "Santos");
+
+    auto response = t13::submit(t13::validForm(residentId,
+                                               "Barangay Clearance",
+                                               "Requesting clearance for employment.",
+                                               "2026-09-15"));
+
+    // Post/Redirect/Get: the POST answers with a redirect, not a page.
+    CHECK(response->statusCode() == k303SeeOther);
+    CHECK(response->getHeader("location") == "/service-requests?msg=submitted");
+
+    REQUIRE(t13::requestCount() == 1);
+    const auto all = ResidentServices::instance().serviceRequestRepository().findAll();
+    const ServiceRequest &saved = all.front();
+    CHECK(saved.getId().has_value());
+    CHECK(saved.getId().value() > 0);
+    CHECK(saved.getResidentId() == residentId);
+    CHECK(saved.getServiceType() == "Barangay Clearance");
+    CHECK(saved.getDescription() == "Requesting clearance for employment.");
+    CHECK(saved.getDateRequested() == "2026-09-15");
+    CHECK(saved.getStatus() == ServiceRequestStatus::Pending);
+
+    // Following the redirect shows the success message and the new request.
+    const std::string body = t12::bodyOf(t13::listPage({{"msg", "submitted"}}));
+    CHECK(t12::contains(body, "Service Request submitted successfully."));
+    CHECK(t12::contains(body, t13::viewLink(saved.getId().value())));
+}
+
+// The browser cannot choose an id or initial status by adding fields.
+DROGON_TEST(T13SubmissionIgnoresForgedIdAndStatusTest)
+{
+    t12::useFreshDatabase("t13_forged_fields");
+    const int residentId = t12::persistResident("Maria", "Santos");
+
+    auto form = t13::validForm(residentId);
+    form["id"] = "999";
+    form["status"] = "Completed";
+    auto response = t13::submit(form);
+
+    CHECK(response->statusCode() == k303SeeOther);
+    REQUIRE(t13::requestCount() == 1);
+    const auto saved = ResidentServices::instance().serviceRequestRepository().findAll().front();
+    CHECK(saved.getId().value() != 999);
+    CHECK(saved.getStatus() == ServiceRequestStatus::Pending);
+}
+
+// T13 Required Test 9: Invalid Submission Shows Validation Feedback
+DROGON_TEST(T13InvalidSubmissionShowsFeedbackAndDoesNotPersistTest)
+{
+    t12::useFreshDatabase("t13_invalid_submit");
+    const int residentId = t12::persistResident("Maria", "Santos");
+
+    t13::Params form = {{"residentId", std::to_string(residentId)},
+                         {"serviceType", "   "},
+                         {"description", ""},
+                         {"dateRequested", "2026-02-30"}};
+    auto response = t13::submit(form);
+
+    CHECK(response->statusCode() == k422UnprocessableEntity);
+    const std::string body = t12::bodyOf(response);
+    CHECK(t12::contains(body, "Service type is required."));
+    CHECK(t12::contains(body, "Description is required."));
+    CHECK(t12::contains(body, "Date requested is required and must be a valid date"));
+    CHECK(t12::contains(body, "class=\"message error\""));
+    CHECK(t13::requestCount() == 0);
+}
+
+// Entered values are preserved so the user only corrects what is wrong.
+DROGON_TEST(T13FailedSubmissionPreservesEnteredValuesTest)
+{
+    t12::useFreshDatabase("t13_preserve");
+    const int residentId = t12::persistResident("Maria", "Santos");
+
+    auto response = t13::submit({{"residentId", std::to_string(residentId)},
+                                 {"serviceType", ""},
+                                 {"description", "Keep this description"},
+                                 {"dateRequested", "2026-09-15"}});
+
+    CHECK(response->statusCode() == k422UnprocessableEntity);
+    const std::string body = t12::bodyOf(response);
+    CHECK(t12::contains(body, "name=\"residentId\" value=\"" + std::to_string(residentId) + "\""));
+    CHECK(t12::contains(body, "Keep this description</textarea>"));
+    CHECK(t12::contains(body, "name=\"dateRequested\" value=\"2026-09-15\""));
+}
+
+DROGON_TEST(T13NonNumericResidentIdIsRejectedTest)
+{
+    t12::useFreshDatabase("t13_bad_resident_id");
+
+    for (const std::string badId : {"abc", "", "-3", "0", "99999999999"})
+    {
+        // Same valid form every time; only the Resident ID is bad.
+        auto form = t13::validForm(1);
+        form["residentId"] = badId;
+        auto response = t13::submit(form);
+        CHECK(response->statusCode() == k422UnprocessableEntity);
+        CHECK(t12::contains(t12::bodyOf(response), "Resident ID must be a positive number."));
+    }
+    CHECK(t13::requestCount() == 0);
+}
+
+// T13 Required Test 10: Missing Resident Submission Is Rejected
+DROGON_TEST(T13MissingResidentSubmissionIsRejectedTest)
+{
+    t12::useFreshDatabase("t13_missing_resident");
+
+    auto response = t13::submit(t13::validForm(4040));
+
+    CHECK(response->statusCode() == k422UnprocessableEntity);
+    CHECK(t12::contains(t12::bodyOf(response), "Resident not found."));
+    CHECK(t13::requestCount() == 0);
+}
+
+// T13 Required Test 11: Inactive Resident Submission Is Rejected
+DROGON_TEST(T13InactiveResidentSubmissionIsRejectedTest)
+{
+    t12::useFreshDatabase("t13_inactive_resident");
+    const int inactiveId = t12::persistResident("Juan", "Dela Cruz", ResidentStatus::Inactive);
+
+    auto response = t13::submit(t13::validForm(inactiveId));
+
+    CHECK(response->statusCode() == k422UnprocessableEntity);
+    CHECK(t12::contains(t12::bodyOf(response), "Inactive Residents cannot submit new Service Requests."));
+    CHECK(t13::requestCount() == 0);
+    // The Resident is not reactivated as a side effect.
+    CHECK(t12::statusOf(inactiveId) == "Inactive");
+}
+
+// T13 Required Test 12: Existing Service Request Details Can Be Viewed
+DROGON_TEST(T13ServiceRequestDetailsCanBeViewedTest)
+{
+    t12::useFreshDatabase("t13_details");
+    const int residentId = t12::persistResident("Maria", "Santos");
+    const int id = t13::persistRequest(residentId,
+                                       "Barangay Clearance",
+                                       "A long description that would be shortened in the list view: "
+                                       "needed for employment, scholarship, and other requirements.",
+                                       "2026-09-15");
+
+    auto response = t13::details(std::to_string(id));
+    CHECK(response->statusCode() == k200OK);
+
+    const std::string body = t12::bodyOf(response);
+    CHECK(t12::contains(body, "<dt>ID</dt>\n        <dd>" + std::to_string(id) + "</dd>"));
+    CHECK(t12::contains(body, "<dt>Resident ID</dt>\n        <dd>" + std::to_string(residentId) + "</dd>"));
+    CHECK(t12::contains(body, "<dd>Barangay Clearance</dd>"));
+    CHECK(t12::contains(body, "scholarship, and other requirements.</dd>")); // complete text
+    CHECK(t12::contains(body, "<dd>2026-09-15</dd>"));
+    CHECK(t12::contains(body, ">Pending</span>"));
+    CHECK(t12::contains(body, "href=\"/service-requests\">Back to Service Request Management</a>"));
+}
+
+// The list shortens long descriptions; the details page keeps the full text.
+DROGON_TEST(T13LongDescriptionIsShortenedOnlyInTheListTest)
+{
+    t12::useFreshDatabase("t13_shorten");
+    const int residentId = t12::persistResident("Maria", "Santos");
+    const std::string tail = "THE-END-OF-A-VERY-LONG-DESCRIPTION";
+    t13::persistRequest(residentId, "Barangay Clearance", std::string(100, 'x') + tail, "2026-09-15");
+
+    CHECK(!t12::contains(t12::bodyOf(t13::listPage()), tail));
+    CHECK(t12::contains(t12::bodyOf(t13::listPage()), "..."));
+}
+
+// T13 Required Test 13: Missing Service Request View Is Handled Safely
+DROGON_TEST(T13MissingServiceRequestViewIsHandledSafelyTest)
+{
+    t12::useFreshDatabase("t13_missing_view");
+
+    for (const std::string id : {"9999", "abc", "-1", "0", "99999999999", "new "})
+    {
+        auto response = t13::details(id);
+        REQUIRE(response != nullptr);
+        CHECK(response->statusCode() == k404NotFound);
+        CHECK(t12::contains(t12::bodyOf(response), "The requested Service Request does not exist."));
+    }
+    CHECK(t13::requestCount() == 0);
+}
+
+// T13 Required Test 14: Pending Request Can Start Processing
+DROGON_TEST(T13PendingRequestCanStartProcessingTest)
+{
+    t12::useFreshDatabase("t13_start");
+    const int residentId = t12::persistResident("Maria", "Santos");
+    const int id = t13::persistRequest(residentId, "Barangay Clearance", "For work.", "2026-09-15");
+    const ServiceRequest before = t13::persisted(id);
+
+    auto response = t13::start(std::to_string(id));
+
+    CHECK(response->statusCode() == k303SeeOther);
+    CHECK(response->getHeader("location") == "/service-requests/" + std::to_string(id) + "?msg=started");
+    CHECK(t13::statusOf(id) == "In Progress");
+
+    // Only the status changed.
+    const ServiceRequest after = t13::persisted(id);
+    CHECK(after.getId() == before.getId());
+    CHECK(after.getResidentId() == before.getResidentId());
+    CHECK(after.getServiceType() == before.getServiceType());
+    CHECK(after.getDescription() == before.getDescription());
+    CHECK(after.getDateRequested() == before.getDateRequested());
+
+    CHECK(t12::contains(t12::bodyOf(t13::details(std::to_string(id), {{"msg", "started"}})),
+                        "Service Request is now In Progress."));
+}
+
+// T13 Required Test 15: Pending Request Can Be Cancelled
+DROGON_TEST(T13PendingRequestCanBeCancelledTest)
+{
+    t12::useFreshDatabase("t13_cancel_pending");
+    const int residentId = t12::persistResident("Maria", "Santos");
+    const int id = t13::persistRequest(residentId, "Barangay Clearance", "For work.", "2026-09-15");
+
+    auto response = t13::cancel(std::to_string(id));
+
+    CHECK(response->statusCode() == k303SeeOther);
+    CHECK(t13::statusOf(id) == "Cancelled");
+    CHECK(t12::contains(t12::bodyOf(t13::details(std::to_string(id), {{"msg", "cancelled"}})),
+                        "Service Request cancelled successfully."));
+}
+
+// T13 Required Test 16: In-Progress Request Can Be Completed
+DROGON_TEST(T13InProgressRequestCanBeCompletedTest)
+{
+    t12::useFreshDatabase("t13_complete");
+    const int residentId = t12::persistResident("Maria", "Santos");
+    const int id = t13::persistRequest(residentId, "Barangay Clearance", "For work.", "2026-09-15",
+                                       ServiceRequestStatus::InProgress);
+
+    auto response = t13::complete(std::to_string(id));
+
+    CHECK(response->statusCode() == k303SeeOther);
+    CHECK(t13::statusOf(id) == "Completed");
+    const std::string body = t12::bodyOf(t13::details(std::to_string(id), {{"msg", "completed"}}));
+    CHECK(t12::contains(body, "Service Request completed successfully."));
+    // Terminal: no further workflow actions are offered.
+    CHECK(!t12::contains(body, "<button"));
+}
+
+// T13 Required Test 17: In-Progress Request Can Be Cancelled
+DROGON_TEST(T13InProgressRequestCanBeCancelledTest)
+{
+    t12::useFreshDatabase("t13_cancel_in_progress");
+    const int residentId = t12::persistResident("Maria", "Santos");
+    const int id = t13::persistRequest(residentId, "Barangay Clearance", "For work.", "2026-09-15",
+                                       ServiceRequestStatus::InProgress);
+
+    auto response = t13::cancel(std::to_string(id));
+
+    CHECK(response->statusCode() == k303SeeOther);
+    CHECK(t13::statusOf(id) == "Cancelled");
+    CHECK(t13::requestCount() == 1); // kept, never deleted
+}
+
+// T13 Required Test 18: Invalid Direct Transition Is Still Rejected by T10
+DROGON_TEST(T13InvalidDirectTransitionIsStillRejectedTest)
+{
+    t12::useFreshDatabase("t13_invalid_transition");
+    const int residentId = t12::persistResident("Maria", "Santos");
+    const int pending = t13::persistRequest(residentId, "Type P", "Pending.", "2026-09-01");
+    const int completed = t13::persistRequest(residentId, "Type C", "Completed.", "2026-09-02",
+                                              ServiceRequestStatus::Completed);
+    const int cancelled = t13::persistRequest(residentId, "Type X", "Cancelled.", "2026-09-03",
+                                              ServiceRequestStatus::Cancelled);
+
+    // A hand-built request for Pending -> Completed (no button offers this).
+    auto response = t13::complete(std::to_string(pending));
+    CHECK(response->statusCode() == k409Conflict);
+    CHECK(t12::contains(t12::bodyOf(response), "That action is not allowed for a Pending Service Request."));
+    CHECK(t13::statusOf(pending) == "Pending");
+
+    // Terminal states never move again.
+    CHECK(t13::cancel(std::to_string(completed))->statusCode() == k409Conflict);
+    CHECK(t13::start(std::to_string(completed))->statusCode() == k409Conflict);
+    CHECK(t13::statusOf(completed) == "Completed");
+    CHECK(t13::start(std::to_string(cancelled))->statusCode() == k409Conflict);
+    CHECK(t13::complete(std::to_string(cancelled))->statusCode() == k409Conflict);
+    CHECK(t13::statusOf(cancelled) == "Cancelled");
+
+    // Same-status requests are rejected too: Pending cannot "start" twice.
+    const int started = t13::persistRequest(residentId, "Type S", "Started.", "2026-09-04",
+                                            ServiceRequestStatus::InProgress);
+    CHECK(t13::start(std::to_string(started))->statusCode() == k409Conflict);
+    CHECK(t13::statusOf(started) == "In Progress");
+}
+
+// Workflow actions on an unknown or malformed id are a controlled 404.
+DROGON_TEST(T13WorkflowActionOnMissingServiceRequestIsHandledSafelyTest)
+{
+    t12::useFreshDatabase("t13_missing_action");
+
+    for (const std::string id : {"9999", "abc", "-1", "0"})
+    {
+        CHECK(t13::start(id)->statusCode() == k404NotFound);
+        CHECK(t13::complete(id)->statusCode() == k404NotFound);
+        CHECK(t13::cancel(id)->statusCode() == k404NotFound);
+    }
+    CHECK(t13::requestCount() == 0); // nothing was created
+}
+
+// The interface offers only the actions that fit the current status.
+DROGON_TEST(T13OnlyValidWorkflowActionsAreOfferedTest)
+{
+    t12::useFreshDatabase("t13_offered_actions");
+    const int residentId = t12::persistResident("Maria", "Santos");
+    const int pending = t13::persistRequest(residentId, "Type P", "Pending.", "2026-09-01");
+    const int inProgress = t13::persistRequest(residentId, "Type I", "In progress.", "2026-09-02",
+                                               ServiceRequestStatus::InProgress);
+    const int completed = t13::persistRequest(residentId, "Type C", "Completed.", "2026-09-03",
+                                              ServiceRequestStatus::Completed);
+    const int cancelled = t13::persistRequest(residentId, "Type X", "Cancelled.", "2026-09-04",
+                                              ServiceRequestStatus::Cancelled);
+
+    auto offers = [&](int id, const std::string &action) {
+        const std::string detailsBody = t12::bodyOf(t13::details(std::to_string(id)));
+        const std::string listBody = t12::bodyOf(t13::listPage());
+        const bool inDetails = t12::contains(detailsBody, t13::actionPath(id, action));
+        const bool inList = t12::contains(listBody, t13::actionPath(id, action));
+        CHECK(inDetails == inList); // list and details agree
+        return inDetails;
+    };
+
+    CHECK(offers(pending, "start"));
+    CHECK(offers(pending, "cancel"));
+    CHECK(!offers(pending, "complete"));
+
+    CHECK(offers(inProgress, "complete"));
+    CHECK(offers(inProgress, "cancel"));
+    CHECK(!offers(inProgress, "start"));
+
+    for (int terminal : {completed, cancelled})
+    {
+        CHECK(!offers(terminal, "start"));
+        CHECK(!offers(terminal, "complete"));
+        CHECK(!offers(terminal, "cancel"));
+    }
+
+    // Every action is a POST form; the interface never links to one with GET.
+    const std::string body = t12::bodyOf(t13::listPage());
+    CHECK(!t12::contains(body, "href=\"/service-requests/" + std::to_string(pending) + "/start\""));
+    CHECK(!t12::contains(body, "href=\"/service-requests/" + std::to_string(pending) + "/cancel\""));
+    CHECK(!t12::contains(body, "<select name=\"status\"")); // no free-form status editor
+}
+
+// T13 Required Test 19: Completed and Cancelled Requests Remain Visible
+DROGON_TEST(T13TerminalRequestsRemainVisibleTest)
+{
+    t12::useFreshDatabase("t13_terminal_visible");
+    const int residentId = t12::persistResident("Maria", "Santos");
+    const int completed = t13::persistRequest(residentId, "Barangay Clearance", "Finished clearance.",
+                                              "2026-09-03", ServiceRequestStatus::Completed);
+    const int cancelled = t13::persistRequest(residentId, "Business Permit", "Dropped permit.",
+                                              "2026-09-04", ServiceRequestStatus::Cancelled);
+
+    // Listing shows the status as text.
+    std::string body = t12::bodyOf(t13::listPage());
+    CHECK(t12::contains(body, t13::viewLink(completed)));
+    CHECK(t12::contains(body, t13::viewLink(cancelled)));
+    CHECK(t12::contains(body, ">Completed</span>"));
+    CHECK(t12::contains(body, ">Cancelled</span>"));
+
+    // Filtering and searching still find them.
+    body = t12::bodyOf(t13::listPage({{"status", "Completed"}}));
+    CHECK(t12::contains(body, t13::viewLink(completed)));
+    CHECK(!t12::contains(body, t13::viewLink(cancelled)));
+    body = t12::bodyOf(t13::listPage({{"q", "permit"}, {"status", "Cancelled"}}));
+    CHECK(t12::contains(body, t13::viewLink(cancelled)));
+    CHECK(!t12::contains(body, t13::viewLink(completed)));
+
+    // Viewing works and explains that the request is terminal.
+    for (int id : {completed, cancelled})
+    {
+        auto response = t13::details(std::to_string(id));
+        CHECK(response->statusCode() == k200OK);
+        const std::string detailBody = t12::bodyOf(response);
+        CHECK(t12::contains(detailBody, "can no longer be processed."));
+        CHECK(!t12::contains(detailBody, "<button"));
+    }
+}
+
+// T13 Required Test 20: GET Requests Do Not Change Service Request State
+DROGON_TEST(T13GetRequestsDoNotChangeServiceRequestsTest)
+{
+    t12::useFreshDatabase("t13_get_read_only");
+    const int residentId = t12::persistResident("Maria", "Santos");
+    const int id = t13::persistRequest(residentId, "Barangay Clearance", "For work.", "2026-09-15");
+
+    t13::listPage();
+    t13::listPage({{"q", "clearance"}});
+    t13::listPage({{"status", "Pending"}});
+    t13::listPage({{"q", "clearance"}, {"status", "Pending"}});
+    t13::submitForm();
+    t13::details(std::to_string(id));
+    t13::details("9999");
+    // Query parameters that look like commands are ignored by read-only pages.
+    t13::listPage({{"action", "cancel"}, {"id", std::to_string(id)}, {"residentId", "1"}});
+    t13::details(std::to_string(id), {{"action", "cancel"}, {"status", "Cancelled"}});
+
+    CHECK(t13::requestCount() == 1);
+    CHECK(t13::statusOf(id) == "Pending");
+}
+
+// Every piece of user-entered text is HTML-escaped when it is rendered.
+DROGON_TEST(T13UserTextIsEscapedTest)
+{
+    t12::useFreshDatabase("t13_escape");
+    const int residentId = t12::persistResident("Maria", "Santos");
+    const int id = t13::persistRequest(residentId,
+                                       "<script>alert(1)</script>",
+                                       "<b>bold</b> & \"quoted\"",
+                                       "2026-09-15");
+
+    for (const std::string &body : {t12::bodyOf(t13::listPage()), t12::bodyOf(t13::details(std::to_string(id)))})
+    {
+        CHECK(!t12::contains(body, "<script>alert(1)</script>"));
+        CHECK(!t12::contains(body, "<b>bold</b>"));
+        CHECK(t12::contains(body, "&lt;script&gt;"));
+    }
+
+    // Failed-submission echo and search echo are escaped too.
+    const std::string formBody = t12::bodyOf(t13::submit({{"residentId", "x"},
+                                                           {"serviceType", "<i>t</i>"},
+                                                           {"description", "<u>d</u>"},
+                                                           {"dateRequested", ""}}));
+    CHECK(!t12::contains(formBody, "<i>t</i>"));
+    CHECK(!t12::contains(formBody, "<u>d</u>"));
+    CHECK(!t12::contains(t12::bodyOf(t13::listPage({{"q", "\"><script>x</script>"}})), "<script>x</script>"));
+}
+
+// An unrecognised flash code never injects text into the page.
+DROGON_TEST(T13UnknownFlashCodeIsIgnoredTest)
+{
+    t12::useFreshDatabase("t13_flash");
+
+    const std::string body = t12::bodyOf(t13::listPage({{"msg", "<b>hacked</b>"}}));
+
+    CHECK(!t12::contains(body, "hacked"));
+    CHECK(!t12::contains(body, "class=\"message success\""));
+}
+
+// Residents and Service Requests link to each other.
+DROGON_TEST(T13NavigationBetweenModulesExistsTest)
+{
+    t12::useFreshDatabase("t13_navigation");
+    const int residentId = t12::persistResident("Maria", "Santos");
+    const int id = t13::persistRequest(residentId, "Barangay Clearance", "For work.", "2026-09-15");
+
+    const std::vector<std::string> pages = {t12::bodyOf(t13::listPage()),
+                                            t12::bodyOf(t13::submitForm()),
+                                            t12::bodyOf(t13::details(std::to_string(id))),
+                                            t12::bodyOf(t13::details("9999")),
+                                            t12::bodyOf(t12::listPage()),
+                                            t12::bodyOf(t12::registerForm()),
+                                            t12::bodyOf(t12::editForm("9999"))};
+    for (const auto &body : pages)
+    {
+        CHECK(t12::contains(body, "<a href=\"/residents\""));
+        CHECK(t12::contains(body, "<a href=\"/service-requests\""));
+    }
 }
 
 // Keeping the original starter test so existing behavior is preserved.

@@ -1,0 +1,61 @@
+<%inc
+#include <memory>
+#include "models/ServiceRequest.h"
+#include "views/ServiceRequestLayout.h"
+%>
+<%c++
+// HttpViewData::get<T> needs a default-constructible T, which ServiceRequest is not.
+const auto &request = *@@.get<std::shared_ptr<ServiceRequest>>("serviceRequest");
+const auto &message = @@.get<std::string>("message");
+const auto &errorMessage = @@.get<std::string>("errorMessage");
+const int idValue = request.getId().value_or(0);
+const bool terminal = request.getStatus() == ServiceRequestStatus::Completed ||
+                      request.getStatus() == ServiceRequestStatus::Cancelled;
+%>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Service Request Details - CSMS</title>
+    <style><%c++ $$ << residentPageStyles(); %></style>
+</head>
+<body>
+<%c++ $$ << navigationBar("service-requests"); %>
+<main>
+    <h1>Service Request #<%c++ $$ << idValue; %></h1>
+
+    <%c++ if (!message.empty()) { %>
+    <div class="message success" role="status"><%c++ $$ << h(message); %></div>
+    <%c++ } %>
+    <%c++ if (!errorMessage.empty()) { %>
+    <div class="message error" role="alert"><%c++ $$ << h(errorMessage); %></div>
+    <%c++ } %>
+
+    <dl class="details">
+        <dt>ID</dt>
+        <dd><%c++ $$ << idValue; %></dd>
+        <dt>Resident ID</dt>
+        <dd><%c++ $$ << request.getResidentId(); %></dd>
+        <dt>Service Type</dt>
+        <dd><%c++ $$ << h(request.getServiceType()); %></dd>
+        <dt>Description</dt>
+        <dd><%c++ $$ << h(request.getDescription()); %></dd>
+        <dt>Date Requested</dt>
+        <dd><%c++ $$ << h(request.getDateRequested()); %></dd>
+        <dt>Status</dt>
+        <dd><%c++ $$ << statusBadge(request.getStatus()); %></dd>
+    </dl>
+
+    <%c++ if (terminal) { %>
+    <p class="terminal-note">This Service Request is <%c++ $$ << h(serviceRequestStatusToString(request.getStatus())); %> and can no longer be processed.</p>
+    <%c++ } else { %>
+    <div class="actions"><%c++ $$ << workflowActions(idValue, request.getStatus()); %></div>
+    <%c++ } %>
+
+    <div class="form-actions">
+        <a class="button secondary" href="/service-requests">Back to Service Request Management</a>
+    </div>
+</main>
+</body>
+</html>
