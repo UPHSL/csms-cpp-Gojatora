@@ -7,6 +7,7 @@
 #include "../models/ServiceRequest.h"
 #include "../models/ServiceRequestValidator.h"
 
+#include "../AppInfo.h"
 #include "../database/Database.h"
 
 #include "../repositories/ResidentRepository.h"
@@ -25,6 +26,8 @@
 #include "../controllers/ResidentController.h"
 #include "../controllers/ServiceRequestController.h"
 #include "../controllers/DashboardController.h"
+#include "../controllers/HealthController.h"
+#include "../controllers/HomeController.h"
 #include "../controllers/ControllerSupport.h"
 
 #include <algorithm>
@@ -33,6 +36,7 @@
 #include <filesystem>
 #include <cstdio>
 #include <set>
+#include <sstream>
 #include <stdexcept>
 #include <vector>
 
@@ -5004,6 +5008,285 @@ DROGON_TEST(T15UnexpectedFailureResponseRevealsNoInternalsTest)
     CHECK(t12::contains(body, "href=\"/dashboard\""));
     CHECK(t12::contains(body, "href=\"/residents\""));
     CHECK(t12::contains(body, "href=\"/service-requests\""));
+}
+
+// ---------------------------------------------------------------------------
+// T16 - Final System Release (release identity + final integration)
+//
+// The release version has one source of truth (AppInfo.h). These tests prove
+// /health and every browser page report that same value, and that the
+// finished system still works as one piece over a real SQLite file.
+// ---------------------------------------------------------------------------
+
+namespace t16
+{
+HttpResponsePtr healthResponse()
+{
+    HttpResponsePtr response;
+    HealthController().asyncHandleHttpRequest(t12::makeRequest(Get, {}),
+                                              [&](const HttpResponsePtr &r) { response = r; });
+    return response;
+}
+
+HttpResponsePtr homePage()
+{
+    HttpResponsePtr response;
+    HomeController().asyncHandleHttpRequest(t12::makeRequest(Get, {}),
+                                            [&](const HttpResponsePtr &r) { response = r; });
+    return response;
+}
+
+Json::Value parseJson(const std::string &text)
+{
+    Json::Value value;
+    Json::CharReaderBuilder builder;
+    std::string errors;
+    std::istringstream stream(text);
+    Json::parseFromStream(builder, stream, &value, &errors);
+    return value;
+}
+
+// The first persisted Service Request of a Resident for a service type.
+int requestIdFor(int residentId, const std::string &serviceType)
+{
+    for (const auto &request : ResidentServices::instance().serviceRequestRepository().findAll())
+    {
+        if (request.getResidentId() == residentId && request.getServiceType() == serviceType)
+        {
+            return request.getId().value();
+        }
+    }
+    return 0;
+}
+
+int residentIdByLastName(const std::string &lastName)
+{
+    const auto found = ResidentServices::instance().repository().searchByName(lastName);
+    return found.empty() ? 0 : found.front().getId().value();
+}
+} // namespace t16
+
+// T16 Release Verification 1: /health must identify the application, report
+// release 1.0.0 and a healthy status, and expose nothing else.
+DROGON_TEST(T16HealthReportsApplicationVersionAndStatusAndNothingElseTest)
+{
+    auto response = t16::healthResponse();
+    REQUIRE(response != nullptr);
+    CHECK(response->statusCode() == k200OK);
+
+    const std::string body = t12::bodyOf(response);
+    const Json::Value json = t16::parseJson(body);
+
+    CHECK(json["application"].asString() == "CSMS");
+    CHECK(json["name"].asString() == "Community Services Management System");
+    CHECK(json["version"].asString() == "1.0.0");
+    CHECK(json["status"].asString() == "OK");
+
+    // Only these four members: /health is a status check, not a debugging dump.
+    std::set<std::string> members;
+    for (const auto &member : json.getMemberNames())
+    {
+        members.insert(member);
+    }
+    CHECK(members == std::set<std::string>({"application", "name", "status", "version"}));
+
+    for (const char *forbidden : {"password", "token", "secret", "sqlite", "SELECT", "\\", "/home", "Users"})
+    {
+        CHECK(!t12::contains(body, forbidden));
+    }
+
+    // The reported version is the single source of truth, not a copy of it.
+    CHECK(json["version"].asString() == app_info::kVersion);
+}
+
+// T16 Release Verification 2: every browser page (including the not-found
+// pages and the home page) shows the same v1.0.0 that /health reports, and no
+// page still carries the old 0.1.0 value.
+DROGON_TEST(T16EveryBrowserPageShowsTheReleaseVersionReportedByHealthTest)
+{
+    t12::useFreshDatabase("t16_ui_version");
+    const int residentId = t12::persistResident("Maria", "Santos");
+    const int requestId = t13::persistRequest(residentId, "Barangay Clearance", "Employment", "2026-09-10");
+
+    const std::string version = t16::parseJson(t12::bodyOf(t16::healthResponse()))["version"].asString();
+    CHECK(version == "1.0.0");
+    const std::string marker = "v" + version;
+
+    const std::map<std::string, HttpResponsePtr> pages = {
+        {"home", t16::homePage()},
+        {"dashboard", t14::dashboardPage()},
+        {"resident list", t12::listPage()},
+        {"resident register form", t12::registerForm()},
+        {"resident edit form", t12::editForm(std::to_string(residentId))},
+        {"resident not found", t12::editForm("999999")},
+        {"service request list", t13::listPage()},
+        {"service request submit form", t13::submitForm()},
+        {"service request details", t13::details(std::to_string(requestId))},
+        {"service request not found", t13::details("999999")},
+    };
+
+    // Collect the names of offending pages so a failure says which page is wrong.
+    std::vector<std::string> missingVersion;
+    std::vector<std::string> staleVersion;
+    for (const auto &[name, response] : pages)
+    {
+        REQUIRE(response != nullptr);
+        const std::string body = t12::bodyOf(response);
+        if (!t12::contains(body, marker))
+        {
+            missingVersion.push_back(name);
+        }
+        if (t12::contains(body, "0.1.0"))
+        {
+            staleVersion.push_back(name);
+        }
+    }
+    CHECK(missingVersion == std::vector<std::string>{});
+    CHECK(staleVersion == std::vector<std::string>{});
+}
+
+// T16 Final Examination test: a complete CSMS lifecycle through the real
+// controllers and services over a real SQLite file. It crosses Resident
+// registration and validation (T02/T04/T12), Service Request eligibility and
+// submission (T09/T13), the controlled status workflow (T10), Resident
+// deactivation (T07), search/filtering (T05/T11) and Dashboard aggregation
+// (T14), then re-opens the database file through a NEW connection to prove
+// the final state is what was actually persisted.
+DROGON_TEST(T16ResidentLifecycleRequestWorkflowAndDashboardAreConsistentOnDiskTest)
+{
+    // --- Known starting state: a brand-new, empty database file. ---
+    const std::string dbPath = makeTempDbPath("t16_final_exam");
+    ResidentServices::useDatabase(dbPath);
+    CHECK(t12::residentCount() == 0);
+    CHECK(t13::requestCount() == 0);
+    {
+        const auto empty = t14::summary();
+        CHECK(empty.residents.total == 0);
+        CHECK(empty.serviceRequests.total == 0);
+        CHECK(empty.serviceRequests.open == 0);
+    }
+
+    // --- Residents: two valid registrations, one invalid one that is refused. ---
+    auto maria = t12::validForm("Maria", "Santos");
+    maria["email"] = "maria.santos@example.com";
+    auto juan = t12::validForm("Juan", "Cruz");
+    juan["email"] = "juan.cruz@example.com";
+    CHECK(t12::submitRegistration(maria)->statusCode() == k303SeeOther);
+    CHECK(t12::submitRegistration(juan)->statusCode() == k303SeeOther);
+
+    auto invalid = t12::validForm("Pedro", "Reyes");
+    invalid["contactNumber"] = "12345";
+    const auto beforeInvalidRegistration = t14::snapshot();
+    CHECK(t12::submitRegistration(invalid)->statusCode() == k422UnprocessableEntity);
+    CHECK(t14::snapshot() == beforeInvalidRegistration);
+    CHECK(t12::residentCount() == 2);
+
+    const int mariaId = t16::residentIdByLastName("Santos");
+    const int juanId = t16::residentIdByLastName("Cruz");
+    REQUIRE(mariaId > 0);
+    REQUIRE(juanId > 0);
+    CHECK(mariaId != juanId);
+
+    // --- Service Requests: eligibility is enforced at submission. ---
+    CHECK(t13::submit(t13::validForm(mariaId, "Barangay Clearance", "Employment", "2026-09-01"))
+              ->statusCode() == k303SeeOther);
+    CHECK(t13::submit(t13::validForm(mariaId, "Barangay ID", "Lost ID", "2026-09-02"))->statusCode() ==
+          k303SeeOther);
+    CHECK(t13::submit(t13::validForm(juanId, "Medical Assistance", "Checkup", "2026-09-03"))->statusCode() ==
+          k303SeeOther);
+    CHECK(t13::submit(t13::validForm(999999))->statusCode() == k422UnprocessableEntity); // unknown Resident
+    CHECK(t13::requestCount() == 3);
+
+    const int clearanceId = t16::requestIdFor(mariaId, "Barangay Clearance");
+    const int barangayIdId = t16::requestIdFor(mariaId, "Barangay ID");
+    const int medicalId = t16::requestIdFor(juanId, "Medical Assistance");
+    REQUIRE(clearanceId > 0);
+    REQUIRE(barangayIdId > 0);
+    REQUIRE(medicalId > 0);
+
+    // --- Workflow: a full valid path, a half path, and refused transitions. ---
+    CHECK(t13::start(std::to_string(clearanceId))->statusCode() == k303SeeOther);
+    CHECK(t13::complete(std::to_string(clearanceId))->statusCode() == k303SeeOther);
+    CHECK(t13::start(std::to_string(barangayIdId))->statusCode() == k303SeeOther);
+    // Refused transitions must not change a single stored row.
+    const auto beforeRefusedTransitions = t14::snapshot();
+    CHECK(t13::complete(std::to_string(medicalId))->statusCode() == k409Conflict);  // Pending cannot jump to Completed
+    CHECK(t13::start(std::to_string(clearanceId))->statusCode() == k409Conflict);   // Completed is terminal
+    CHECK(t14::snapshot() == beforeRefusedTransitions);
+    CHECK(t13::statusOf(clearanceId) == "Completed");
+    CHECK(t13::statusOf(barangayIdId) == "In Progress");
+    CHECK(t13::statusOf(medicalId) == "Pending");
+
+    // --- Lifecycle: deactivating Maria blocks NEW requests only. ---
+    CHECK(t12::submitDeactivation(std::to_string(mariaId))->statusCode() == k303SeeOther);
+    CHECK(t12::statusOf(mariaId) == "Inactive");
+    const auto beforeRefusedSubmission = t14::snapshot();
+    CHECK(t13::submit(t13::validForm(mariaId, "Barangay Certificate", "School", "2026-09-04"))
+              ->statusCode() == k422UnprocessableEntity);
+    CHECK(t14::snapshot() == beforeRefusedSubmission);
+    CHECK(t13::requestCount() == 3);
+    CHECK(t13::cancel(std::to_string(barangayIdId))->statusCode() == k303SeeOther); // existing work stays manageable
+    CHECK(t13::submit(t13::validForm(juanId, "Barangay Certificate", "School", "2026-09-05"))->statusCode() ==
+          k303SeeOther);
+    CHECK(t13::requestCount() == 4);
+    const int certificateId = t16::requestIdFor(juanId, "Barangay Certificate");
+    REQUIRE(certificateId > 0);
+
+    // --- Search and filtering read the same persisted data. ---
+    const std::string pendingPage = t12::bodyOf(t13::listPage({{"status", "Pending"}}));
+    CHECK(t12::contains(pendingPage, t13::viewLink(medicalId)));
+    CHECK(t12::contains(pendingPage, t13::viewLink(certificateId)));
+    CHECK(!t12::contains(pendingPage, t13::viewLink(clearanceId)));
+    CHECK(!t12::contains(pendingPage, t13::viewLink(barangayIdId)));
+    const std::string residentSearch = t12::bodyOf(t12::listPage({{"q", "santos"}}));
+    CHECK(t12::contains(residentSearch, "Santos"));
+    CHECK(t12::contains(residentSearch, "Inactive"));
+    CHECK(!t12::contains(residentSearch, "Cruz"));
+
+    // --- Dashboard aggregation, read from the same persistence. ---
+    const auto summary = t14::summary();
+    CHECK(summary.residents.total == 2);
+    CHECK(summary.residents.active == 1);
+    CHECK(summary.residents.inactive == 1);
+    CHECK(summary.serviceRequests.total == 4);
+    CHECK(summary.serviceRequests.pending == 2);
+    CHECK(summary.serviceRequests.inProgress == 0);
+    CHECK(summary.serviceRequests.completed == 1);
+    CHECK(summary.serviceRequests.cancelled == 1);
+    CHECK(summary.serviceRequests.open == 2);
+    const std::string dashboard = t12::bodyOf(t14::dashboardPage());
+    CHECK(t12::contains(dashboard, t14::card("Total Residents", 2)));
+    CHECK(t12::contains(dashboard, t14::card("Open Service Requests", 2)));
+    CHECK(t12::contains(dashboard, t14::card("Completed", 1)));
+    CHECK(t12::contains(dashboard, t14::card("Cancelled", 1)));
+
+    // --- Read-only pages changed nothing. ---
+    const auto stateBeforeReads = t14::snapshot();
+    t14::dashboardPage();
+    t12::listPage();
+    t13::listPage();
+    t13::details(std::to_string(clearanceId));
+    CHECK(t14::snapshot() == stateBeforeReads);
+
+    // --- Final persisted state: re-open the database FILE on a new connection. ---
+    Database reopened(dbPath);
+    ResidentRepository residents(reopened);
+    ServiceRequestRepository requests(reopened);
+
+    CHECK(residents.countAll() == 2);
+    CHECK(residents.countByStatus(ResidentStatus::Active) == 1);
+    CHECK(residents.countByStatus(ResidentStatus::Inactive) == 1);
+    CHECK(residents.findById(mariaId)->getStatus() == ResidentStatus::Inactive);
+    CHECK(residents.findById(juanId)->getStatus() == ResidentStatus::Active);
+
+    CHECK(requests.countAll() == 4);
+    CHECK(requests.findById(clearanceId)->getStatus() == ServiceRequestStatus::Completed);
+    CHECK(requests.findById(barangayIdId)->getStatus() == ServiceRequestStatus::Cancelled);
+    CHECK(requests.findById(medicalId)->getStatus() == ServiceRequestStatus::Pending);
+    CHECK(requests.findById(certificateId)->getStatus() == ServiceRequestStatus::Pending);
+    CHECK(requests.countByStatus(ServiceRequestStatus::Pending) +
+              requests.countByStatus(ServiceRequestStatus::InProgress) ==
+          summary.serviceRequests.open);
 }
 
 // Keeping the original starter test so existing behavior is preserved.

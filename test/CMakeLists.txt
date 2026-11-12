@@ -18,6 +18,8 @@ add_executable(${PROJECT_NAME}
     ../controllers/ResidentController.cc
     ../controllers/ServiceRequestController.cc
     ../controllers/DashboardController.cc
+    ../controllers/HealthController.cc
+    ../controllers/HomeController.cc
     ../services/ServiceRequestSubmissionService.cc
     ../services/ServiceRequestStatusService.cc
     ../services/ServiceRequestQueryService.cc

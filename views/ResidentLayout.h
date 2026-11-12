@@ -4,6 +4,8 @@
 
 #include <string>
 
+#include "AppInfo.h"
+
 // Small helpers shared by the Resident and Service Request views.
 // Presentation only: nothing here validates, queries, or changes data.
 
@@ -46,6 +48,7 @@ inline const char *residentPageStyles()
         .site-nav { background: #1a56b0; padding: 0 3%; display: flex; gap: 4px; }
         .site-nav a { color: #fff; text-decoration: none; padding: 12px 16px; font-weight: 700; }
         .site-nav a.current { background: rgba(255, 255, 255, 0.2); }
+        .site-nav .app-version { margin-left: auto; align-self: center; color: #fff; font-size: 0.9rem; font-weight: 700; }
         select, textarea, input[type=date] {
             width: 100%; padding: 8px; border: 1px solid #9aa3af; border-radius: 6px; font-size: 1rem;
             font-family: inherit; background: #fff; }
@@ -90,5 +93,7 @@ inline std::string navigationBar(const std::string &current)
     return "<nav class=\"site-nav\" aria-label=\"Main\">" +
            link("dashboard", "/dashboard", "Dashboard") +
            link("residents", "/residents", "Residents") +
-           link("service-requests", "/service-requests", "Service Requests") + "</nav>";
+           link("service-requests", "/service-requests", "Service Requests") +
+           // The release version comes from AppInfo.h, the single source of truth.
+           "<span class=\"app-version\">CSMS v" + std::string(app_info::kVersion) + "</span></nav>";
 }

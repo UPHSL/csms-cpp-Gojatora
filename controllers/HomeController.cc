@@ -1,10 +1,12 @@
 #include "HomeController.h"
 
+#include "AppInfo.h"
+
 void HomeController::asyncHandleHttpRequest(
     const HttpRequestPtr&,
     std::function<void(const HttpResponsePtr&)>&& callback)
 {
-    const std::string html = R"(
+    const std::string html = std::string(R"(
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -93,7 +95,7 @@ void HomeController::asyncHandleHttpRequest(
         <section class="details">
             <div class="detail">
                 <strong>Current Sprint</strong>
-                Sprint 5 - System Integration and Completion
+                Sprint 6 - Final Release
             </div>
 
             <div class="detail">
@@ -103,7 +105,7 @@ void HomeController::asyncHandleHttpRequest(
 
             <div class="detail">
                 <strong>Version</strong>
-                0.1.0
+                v)" + std::string(app_info::kVersion) + R"(
             </div>
         </section>
 
@@ -112,7 +114,7 @@ void HomeController::asyncHandleHttpRequest(
     </main>
 </body>
 </html>
-)";
+)");
 
     auto response = HttpResponse::newHttpResponse();
     response->setContentTypeCode(CT_TEXT_HTML);
