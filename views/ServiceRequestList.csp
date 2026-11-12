@@ -1,0 +1,107 @@
+<%inc
+#include <vector>
+#include "models/ServiceRequest.h"
+#include "views/ServiceRequestLayout.h"
+%>
+<%c++
+const auto &serviceRequests = @@.get<std::vector<ServiceRequest>>("serviceRequests");
+const auto &searchTerm = @@.get<std::string>("searchTerm");
+const auto &statusFilter = @@.get<std::string>("statusFilter");
+const auto &message = @@.get<std::string>("message");
+const auto &errorMessage = @@.get<std::string>("errorMessage");
+const bool filtered = !searchTerm.empty() || !statusFilter.empty();
+
+auto statusOption = [&](const std::string &value, const std::string &label) {
+    $$ << "<option value=\"" << h(value) << "\"" << (statusFilter == value ? " selected" : "")
+       << ">" << h(label) << "</option>";
+};
+%>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Service Request Management - CSMS</title>
+    <style><%c++ $$ << residentPageStyles(); %></style>
+</head>
+<body>
+<%c++ $$ << navigationBar("service-requests"); %>
+<main>
+    <h1>Service Request Management</h1>
+
+    <%c++ if (!message.empty()) { %>
+    <div class="message success" role="status"><%c++ $$ << h(message); %></div>
+    <%c++ } %>
+    <%c++ if (!errorMessage.empty()) { %>
+    <div class="message error" role="alert"><%c++ $$ << h(errorMessage); %></div>
+    <%c++ } %>
+
+    <div class="toolbar">
+        <form class="search" method="get" action="/service-requests">
+            <div>
+                <label for="q">Search Service Requests</label>
+                <input type="search" id="q" name="q" value="<%c++ $$ << h(searchTerm); %>" placeholder="Service type or description">
+            </div>
+            <div>
+                <label for="status">Status</label>
+                <select id="status" name="status">
+                    <%c++
+                    statusOption("", "All Statuses");
+                    statusOption("Pending", "Pending");
+                    statusOption("In Progress", "In Progress");
+                    statusOption("Completed", "Completed");
+                    statusOption("Cancelled", "Cancelled");
+                    %>
+                </select>
+            </div>
+            <button type="submit">Search</button>
+            <%c++ if (filtered) { %>
+            <a class="button secondary" href="/service-requests">Clear</a>
+            <%c++ } %>
+        </form>
+        <a class="button" href="/service-requests/new">Submit Service Request</a>
+    </div>
+
+    <%c++ if (serviceRequests.empty()) { %>
+    <p class="empty">No Service Requests found.</p>
+    <%c++ } else { %>
+    <div class="table-wrap">
+    <table>
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>Resident ID</th>
+                <th>Service Type</th>
+                <th>Description</th>
+                <th>Date Requested</th>
+                <th>Status</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+        <%c++ for (const auto &request : serviceRequests) {
+            const int idValue = request.getId().value_or(0);
+            const std::string id = std::to_string(idValue);
+        %>
+            <tr>
+                <td><%c++ $$ << id; %></td>
+                <td><%c++ $$ << request.getResidentId(); %></td>
+                <td><%c++ $$ << h(request.getServiceType()); %></td>
+                <td><%c++ $$ << h(shorten(request.getDescription())); %></td>
+                <td><%c++ $$ << h(request.getDateRequested()); %></td>
+                <td><%c++ $$ << statusBadge(request.getStatus()); %></td>
+                <td>
+                    <div class="actions">
+                        <a href="/service-requests/<%c++ $$ << id; %>">View</a>
+                        <%c++ $$ << workflowActions(idValue, request.getStatus()); %>
+                    </div>
+                </td>
+            </tr>
+        <%c++ } %>
+        </tbody>
+    </table>
+    </div>
+    <%c++ } %>
+</main>
+</body>
+</html>

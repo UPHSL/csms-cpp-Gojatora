@@ -1,0 +1,70 @@
+<%inc
+#include <map>
+#include "views/ServiceRequestLayout.h"
+%>
+<%c++
+using FieldMap = std::map<std::string, std::string>;
+const auto &values = @@.get<FieldMap>("values");
+const auto &errors = @@.get<FieldMap>("errors");
+
+auto valueOf = [&](const std::string &name) {
+    auto it = values.find(name);
+    return it == values.end() ? std::string() : it->second;
+};
+auto errorHtml = [&](const std::string &name) {
+    auto it = errors.find(name);
+    return it == errors.end() ? std::string()
+                              : "<div class=\"field-error\">" + h(it->second) + "</div>";
+};
+// Server-side validation (T09) is authoritative, so the inputs deliberately
+// carry no `required` attribute: the server's feedback is always what is shown.
+auto input = [&](const std::string &name, const std::string &label, const std::string &type) {
+    $$ << "<div class=\"field\"><label for=\"" << name << "\">" << label << "</label>"
+       << "<input type=\"" << type << "\" id=\"" << name << "\" name=\"" << name
+       << "\" value=\"" << h(valueOf(name)) << "\">" << errorHtml(name) << "</div>";
+};
+%>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Submit Service Request - CSMS</title>
+    <style><%c++ $$ << residentPageStyles(); %></style>
+</head>
+<body>
+<%c++ $$ << navigationBar("service-requests"); %>
+<main>
+    <h1>Submit Service Request</h1>
+
+    <%c++ if (!errors.empty()) { %>
+    <div class="message error" role="alert">
+        Please correct the following:
+        <ul>
+        <%c++ for (const auto &entry : errors) { %>
+            <li><%c++ $$ << h(entry.second); %></li>
+        <%c++ } %>
+        </ul>
+    </div>
+    <%c++ } %>
+
+    <form method="post" action="/service-requests/new">
+        <%c++
+        input("residentId", "Resident ID", "text");
+        input("serviceType", "Service Type", "text");
+        %>
+        <div class="field">
+            <label for="description">Description</label>
+            <textarea id="description" name="description"><%c++ $$ << h(valueOf("description")); %></textarea>
+            <%c++ $$ << errorHtml("description"); %>
+        </div>
+        <%c++ input("dateRequested", "Date Requested", "date"); %>
+        <div class="form-actions">
+            <button type="submit">Submit Service Request</button>
+            <a class="button secondary" href="/service-requests">Back to Service Request Management</a>
+            <a class="button secondary" href="/residents">View Residents</a>
+        </div>
+    </form>
+</main>
+</body>
+</html>
