@@ -87,13 +87,13 @@ void HomeController::asyncHandleHttpRequest(
         <h1>Community Services<br>Management System</h1>
 
         <p class="message">
-            Starter application initialized successfully.
+            CSMS is running. Choose a module below to continue.
         </p>
 
         <section class="details">
             <div class="detail">
                 <strong>Current Sprint</strong>
-                Sprint 0 - Developer Onboarding
+                Sprint 5 - System Integration and Completion
             </div>
 
             <div class="detail">

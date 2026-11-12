@@ -184,7 +184,8 @@ std::vector<Resident> ResidentRepository::findAll()
     return residents;
 }
 
-// Case-insensitive partial match against firstName OR lastName.
+// Case-insensitive partial match against firstName OR lastName. The term is
+// literal text: %, _ and the backslash are not treated as LIKE wildcards.
 // SQLite's LIKE is case-insensitive by default for ASCII text, and
 // (a OR b) on a single row can only ever produce that row once, so a
 // Resident matching on both first and last name still appears only once.
@@ -193,7 +194,7 @@ std::vector<Resident> ResidentRepository::searchByName(const std::string &search
     const char *sql =
         "SELECT id, first_name, last_name, address, contact_number, email, status "
         "FROM residents "
-        "WHERE first_name LIKE ? OR last_name LIKE ? "
+        "WHERE first_name LIKE ? ESCAPE '\\' OR last_name LIKE ? ESCAPE '\\' "
         "ORDER BY last_name COLLATE NOCASE ASC, first_name COLLATE NOCASE ASC, id ASC;";
 
     sqlite3_stmt *statement = nullptr;
@@ -205,9 +206,20 @@ std::vector<Resident> ResidentRepository::searchByName(const std::string &search
                                   std::string(sqlite3_errmsg(database_.handle())));
     }
 
-    // Wrap the term in % wildcards for a partial/substring match, and bind
-    // it (never concatenate it into the SQL string directly).
-    std::string pattern = "%" + searchTerm + "%";
+    // Escape LIKE's own wildcards (%, _ and the escape character) so they match
+    // literally, the same way Service Request search (T11) treats them. Then
+    // wrap the term in % wildcards for a partial/substring match, and bind it
+    // (never concatenate it into the SQL string directly).
+    std::string escaped;
+    for (char c : searchTerm)
+    {
+        if (c == '\\' || c == '%' || c == '_')
+        {
+            escaped += '\\';
+        }
+        escaped += c;
+    }
+    std::string pattern = "%" + escaped + "%";
     sqlite3_bind_text(statement, 1, pattern.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(statement, 2, pattern.c_str(), -1, SQLITE_TRANSIENT);
 

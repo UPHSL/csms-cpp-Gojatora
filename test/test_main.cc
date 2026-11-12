@@ -25,6 +25,7 @@
 #include "../controllers/ResidentController.h"
 #include "../controllers/ServiceRequestController.h"
 #include "../controllers/DashboardController.h"
+#include "../controllers/ControllerSupport.h"
 
 #include <algorithm>
 #include <map>
@@ -32,6 +33,7 @@
 #include <filesystem>
 #include <cstdio>
 #include <set>
+#include <stdexcept>
 #include <vector>
 
 // Creates a fresh, uniquely-named temporary SQLite file path for a test.
@@ -42,8 +44,18 @@ std::string makeTempDbPath(const std::string &testName)
     static int counter = 0;
     counter++;
 
-    std::filesystem::path tempDir = std::filesystem::temp_directory_path();
-    std::filesystem::path dbPath = tempDir / ("csms_test_" + testName + "_" + std::to_string(counter) + ".sqlite3");
+    // Every test database lives in one dedicated folder. The first time a run
+    // needs it, the folder is wiped, so databases left behind by an earlier
+    // run (or by an earlier crash) can never leak into this one and the
+    // system temp folder does not fill up with one file per test per run.
+    static const std::filesystem::path tempDir = []() {
+        std::filesystem::path dir = std::filesystem::temp_directory_path() / "csms_cpp_tests";
+        std::error_code ignored;
+        std::filesystem::remove_all(dir, ignored);
+        std::filesystem::create_directories(dir, ignored);
+        return dir;
+    }();
+    std::filesystem::path dbPath = tempDir / (testName + "_" + std::to_string(counter) + ".sqlite3");
 
     // Remove any leftover file from a previous run, if it exists,
     // so each test starts from a clean, empty database.
@@ -4605,6 +4617,393 @@ DROGON_TEST(T14FindRecentRespectsLimitAndOrderingTest)
     CHECK(repository.findRecent(0).empty());
     CHECK(repository.findRecent(-1).empty());
     CHECK(repository.countAll() == 4);
+}
+
+// ---------------------------------------------------------------------------
+// T15 - System Hardening and Regression Testing
+//
+// These tests look at the whole integrated system rather than one ticket. Each
+// one builds its own throwaway database (no shared state, no hardcoded
+// generated ids) and proves outcomes by re-reading persistence afterwards.
+// ---------------------------------------------------------------------------
+
+namespace t15
+{
+// Everything persisted, as comparable text: used to prove "nothing changed".
+std::vector<std::string> persistedState()
+{
+    return t14::snapshot();
+}
+
+bool leaksInternals(const std::string &body)
+{
+    for (const char *marker : {"sqlite", "SQLITE", "SELECT ", "INSERT ", "UPDATE ", "exception", "Exception",
+                               "terminate", "std::", "stack"})
+    {
+        if (t12::contains(body, marker))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+} // namespace t15
+
+// T15 Hardening Test 1 (Category 1 - Invalid or Malformed Input):
+// A malformed route identifier must be answered with the controlled not-found
+// page on EVERY Resident and Service Request route, never reach a record that
+// happens to exist, and leave persistence untouched.
+DROGON_TEST(T15MalformedRouteIdentifiersAreRejectedOnEveryRouteTest)
+{
+    t12::useFreshDatabase("t15_malformed_ids");
+    const int residentId = t12::persistResident("Maria", "Santos");
+    const int requestId = t13::persistRequest(residentId, "Barangay Clearance", "Employment", "2026-09-10");
+    const auto before = t15::persistedState();
+    REQUIRE(before.size() == 2);
+
+    // Identifiers that look like (or start like) a real id but are not a plain
+    // positive number, plus values that are numeric but cannot name a record.
+    const std::vector<std::string> malformed = {
+        "abc", "-1", "0", "1.5", "+1", "1abc", "1 OR 1=1", "1;DROP TABLE residents", "",
+        "99999999999999999999", "0x1"};
+
+    for (const auto &id : malformed)
+    {
+        const std::string label = "id='" + id + "'";
+        const auto good = t12::validForm("Changed", "Name");
+
+        const std::vector<HttpResponsePtr> responses = {
+            t12::editForm(id),
+            t12::submitUpdate(id, good),
+            t12::submitDeactivation(id),
+            t13::details(id),
+            t13::start(id),
+            t13::complete(id),
+            t13::cancel(id)};
+
+        for (const auto &response : responses)
+        {
+            REQUIRE(response != nullptr);
+            CHECK(response->statusCode() == k404NotFound);
+            CHECK(!t15::leaksInternals(t12::bodyOf(response)));
+        }
+        CHECK(t15::persistedState() == before);
+    }
+
+    // The existing records are still reachable by their real ids.
+    CHECK(t12::editForm(std::to_string(residentId))->statusCode() == k200OK);
+    CHECK(t13::details(std::to_string(requestId))->statusCode() == k200OK);
+    CHECK(t12::statusOf(residentId) == "Active");
+    CHECK(t13::statusOf(requestId) == "Pending");
+}
+
+// T15 Hardening Test 2 (Category 2 - Rejected Mutation Protects Persistence):
+// Every kind of rejected state-changing request is sent to a populated system,
+// and the persisted rows are then re-read. A partly valid Resident update must
+// not save its valid part, and forged id/status fields must be ignored.
+DROGON_TEST(T15RejectedMutationsLeaveEveryPersistedRowUnchangedTest)
+{
+    t12::useFreshDatabase("t15_rejected_mutations");
+    const int activeId = t12::persistResident("Maria", "Santos");
+    const int inactiveId = t12::persistResident("Juan", "Cruz", ResidentStatus::Inactive);
+    const int pendingId = t13::persistRequest(activeId, "Barangay Clearance", "Employment", "2026-09-10");
+    const int cancelledId = t13::persistRequest(activeId, "Barangay ID", "Lost ID", "2026-09-11",
+                                                ServiceRequestStatus::Cancelled);
+
+    const auto before = t15::persistedState();
+    const Resident storedBefore = ResidentServices::instance().repository().findById(activeId).value();
+    const size_t residentsBefore = t12::residentCount();
+    const size_t requestsBefore = t13::requestCount();
+
+    // Valid first name + invalid contact number: all-or-nothing, so neither
+    // may be saved. The forged "status" and "id" fields must not be read.
+    auto partialUpdate = t12::validForm("Changed", "Santos");
+    partialUpdate["contactNumber"] = "12345";
+    partialUpdate["status"] = "Inactive";
+    partialUpdate["id"] = std::to_string(inactiveId);
+    CHECK(t12::submitUpdate(std::to_string(activeId), partialUpdate)->statusCode() == k422UnprocessableEntity);
+
+    // Invalid registration and an update of a Resident that does not exist.
+    auto badRegistration = t12::validForm("New", "Person");
+    badRegistration["email"] = "not-an-email";
+    CHECK(t12::submitRegistration(badRegistration)->statusCode() == k422UnprocessableEntity);
+    CHECK(t12::submitUpdate("999999", t12::validForm("Ghost", "Resident"))->statusCode() == k404NotFound);
+    CHECK(t12::submitDeactivation("999999")->statusCode() == k404NotFound);
+
+    // Service Request submissions that must be refused.
+    CHECK(t13::submit(t13::validForm(inactiveId))->statusCode() == k422UnprocessableEntity);
+    CHECK(t13::submit(t13::validForm(999999))->statusCode() == k422UnprocessableEntity);
+    CHECK(t13::submit(t13::validForm(activeId, "Barangay Clearance", "Employment", "2026-02-30"))
+              ->statusCode() == k422UnprocessableEntity);
+
+    // Workflow actions that must be refused: skipping a step, and any move
+    // out of a terminal state.
+    CHECK(t13::complete(std::to_string(pendingId))->statusCode() == k409Conflict);
+    CHECK(t13::start(std::to_string(cancelledId))->statusCode() == k409Conflict);
+    CHECK(t13::complete(std::to_string(cancelledId))->statusCode() == k409Conflict);
+    CHECK(t13::cancel(std::to_string(cancelledId))->statusCode() == k409Conflict);
+    CHECK(t13::start("999999")->statusCode() == k404NotFound);
+
+    // Re-read persistence instead of trusting the responses.
+    CHECK(t15::persistedState() == before);
+    CHECK(t12::residentCount() == residentsBefore);
+    CHECK(t13::requestCount() == requestsBefore);
+    const Resident storedAfter = ResidentServices::instance().repository().findById(activeId).value();
+    CHECK(storedAfter.getFirstName() == storedBefore.getFirstName());
+    CHECK(storedAfter.getContactNumber() == storedBefore.getContactNumber());
+    CHECK(storedAfter.getStatus() == ResidentStatus::Active);
+    CHECK(t12::statusOf(inactiveId) == "Inactive");
+    CHECK(t13::statusOf(pendingId) == "Pending");
+    CHECK(t13::statusOf(cancelledId) == "Cancelled");
+    CHECK(!ResidentServices::instance().repository().findById(999999).has_value());
+}
+
+// T15 Hardening Test 3 (Category 3 - Read-Only Request Safety):
+// Every read-only page, repeated several times and including searches, filters,
+// flash codes, a rejected filter value and missing records, must leave both the
+// persisted rows and the dashboard aggregates exactly as they were.
+DROGON_TEST(T15ReadOnlyPagesNeverMutatePersistenceTest)
+{
+    t12::useFreshDatabase("t15_read_only");
+    const int maria = t12::persistResident("Maria", "Santos");
+    t12::persistResident("Juan", "Cruz", ResidentStatus::Inactive);
+    t14::persistMixedRequests(maria);
+    const int requestId = t13::persistRequest(maria, "Medical Assistance", "Checkup", "2026-09-20");
+
+    const auto before = t15::persistedState();
+    const auto summaryBefore = t14::summary();
+    REQUIRE(before.size() == 10); // 2 Residents + 8 Service Requests
+
+    for (int round = 0; round < 3; ++round)
+    {
+        t14::dashboardPage();
+
+        t12::listPage();
+        t12::listPage({{"q", "santos"}});
+        t12::listPage({{"q", "no such person"}});
+        t12::listPage({{"q", "' OR 1=1 --"}, {"msg", "deactivated"}});
+        t12::registerForm();
+        t12::editForm(std::to_string(maria));
+        t12::editForm("999999");
+
+        t13::listPage();
+        t13::listPage({{"q", "clearance"}});
+        t13::listPage({{"status", "Completed"}});
+        t13::listPage({{"q", "clearance"}, {"status", "Pending"}});
+        t13::listPage({{"status", "Approved"}}); // unsupported filter is rejected, not applied
+        t13::submitForm();
+        t13::details(std::to_string(requestId));
+        t13::details(std::to_string(requestId), {{"msg", "completed"}});
+        t13::details("999999");
+
+        CHECK(t15::persistedState() == before);
+    }
+
+    const auto summaryAfter = t14::summary();
+    CHECK(summaryAfter.residents.total == summaryBefore.residents.total);
+    CHECK(summaryAfter.residents.active == summaryBefore.residents.active);
+    CHECK(summaryAfter.residents.inactive == summaryBefore.residents.inactive);
+    CHECK(summaryAfter.serviceRequests.total == summaryBefore.serviceRequests.total);
+    CHECK(summaryAfter.serviceRequests.pending == summaryBefore.serviceRequests.pending);
+    CHECK(summaryAfter.serviceRequests.completed == summaryBefore.serviceRequests.completed);
+    CHECK(t13::statusOf(requestId) == "Pending");
+}
+
+// T15 Hardening Test 4 (Category 4 - Cross-Feature Regression):
+// Deactivation (T07) must stay consistent with eligibility (T09), the status
+// workflow (T10), search (T05/T11), the web interface (T12/T13) and the
+// dashboard (T14), all driven through the real controllers.
+DROGON_TEST(T15ResidentDeactivationStaysConsistentAcrossAllFeaturesTest)
+{
+    t12::useFreshDatabase("t15_cross_feature");
+    const int maria = t12::persistResident("Maria", "Santos");
+    const int juan = t12::persistResident("Juan", "Cruz");
+    const int inProgressId = t13::persistRequest(maria, "Barangay Clearance", "Employment", "2026-09-10",
+                                                 ServiceRequestStatus::InProgress);
+    const int pendingId = t13::persistRequest(maria, "Barangay ID", "Lost ID", "2026-09-11");
+    const int juansId = t13::persistRequest(juan, "Medical Assistance", "Checkup", "2026-09-12");
+
+    {
+        const auto s = t14::summary();
+        CHECK(s.residents.active == 2);
+        CHECK(s.residents.inactive == 0);
+        CHECK(s.serviceRequests.open == 3);
+    }
+
+    // T07 through the T12 interface: soft deactivation.
+    auto deactivated = t12::submitDeactivation(std::to_string(maria));
+    CHECK(deactivated->statusCode() == k303SeeOther);
+    CHECK(deactivated->getHeader("location") == "/residents?msg=deactivated");
+
+    // T09: the Inactive Resident can no longer submit; an Active one still can.
+    const size_t requestsBefore = t13::requestCount();
+    auto refused = t13::submit(t13::validForm(maria));
+    CHECK(refused->statusCode() == k422UnprocessableEntity);
+    CHECK(t12::contains(t12::bodyOf(refused), "Inactive Residents cannot submit new Service Requests."));
+    CHECK(t13::requestCount() == requestsBefore);
+    CHECK(t13::submit(t13::validForm(juan, "Barangay Certificate", "School", "2026-09-13"))->statusCode() ==
+          k303SeeOther);
+    CHECK(t13::requestCount() == requestsBefore + 1);
+
+    // T10 through T13: Maria's existing requests stay manageable.
+    CHECK(t13::complete(std::to_string(inProgressId))->statusCode() == k303SeeOther);
+    CHECK(t13::cancel(std::to_string(pendingId))->statusCode() == k303SeeOther);
+    CHECK(t13::statusOf(inProgressId) == "Completed");
+    CHECK(t13::statusOf(pendingId) == "Cancelled");
+    CHECK(t13::statusOf(juansId) == "Pending");
+
+    // T05/T12: Maria is still persisted, still searchable, and shown Inactive.
+    CHECK(t12::statusOf(maria) == "Inactive");
+    const std::string residentPage = t12::bodyOf(t12::listPage({{"q", "santos"}}));
+    CHECK(t12::contains(residentPage, "Santos"));
+    CHECK(t12::contains(residentPage, "Inactive"));
+
+    // T11/T13: terminal requests remain filterable and viewable.
+    const std::string completedPage = t12::bodyOf(t13::listPage({{"status", "Completed"}}));
+    CHECK(t12::contains(completedPage, t13::viewLink(inProgressId)));
+    CHECK(!t12::contains(completedPage, t13::viewLink(juansId)));
+    CHECK(t13::details(std::to_string(pendingId))->statusCode() == k200OK);
+
+    // T14: the dashboard reflects all of it from persistence.
+    const auto s = t14::summary();
+    CHECK(s.residents.total == 2);
+    CHECK(s.residents.active == 1);
+    CHECK(s.residents.inactive == 1);
+    CHECK(s.serviceRequests.total == 4);
+    CHECK(s.serviceRequests.pending == 2);
+    CHECK(s.serviceRequests.inProgress == 0);
+    CHECK(s.serviceRequests.completed == 1);
+    CHECK(s.serviceRequests.cancelled == 1);
+    CHECK(s.serviceRequests.open == 2);
+
+    const std::string dashboard = t12::bodyOf(t14::dashboardPage());
+    CHECK(t12::contains(dashboard, t14::card("Active Residents", 1)));
+    CHECK(t12::contains(dashboard, t14::card("Inactive Residents", 1)));
+    CHECK(t12::contains(dashboard, t14::card("Open Service Requests", 2)));
+}
+
+// T15 Hardening Test 5 (Category 5 - Repeatability / Boundary Behavior):
+// Repeating the same state-changing request (a refreshed or double-submitted
+// form) must be safe: deactivating again changes nothing, and every action
+// against a terminal Service Request is refused every time.
+DROGON_TEST(T15RepeatedActionsAndTerminalStatesAreSafeTest)
+{
+    t12::useFreshDatabase("t15_repeatability");
+    const int residentId = t12::persistResident("Maria", "Santos");
+    const int completedId = t13::persistRequest(residentId, "Barangay Clearance", "Employment", "2026-09-10",
+                                                ServiceRequestStatus::Completed);
+    const int cancelledId = t13::persistRequest(residentId, "Barangay ID", "Lost ID", "2026-09-11",
+                                                ServiceRequestStatus::Cancelled);
+
+    // Repeated deactivation: the first call changes state, later calls do not.
+    const auto first = t12::submitDeactivation(std::to_string(residentId));
+    CHECK(first->getHeader("location") == "/residents?msg=deactivated");
+    const auto afterFirst = t15::persistedState();
+    for (int attempt = 0; attempt < 3; ++attempt)
+    {
+        const auto again = t12::submitDeactivation(std::to_string(residentId));
+        CHECK(again->statusCode() == k303SeeOther);
+        CHECK(again->getHeader("location") == "/residents?msg=alreadyinactive");
+        CHECK(t15::persistedState() == afterFirst);
+    }
+    CHECK(t12::statusOf(residentId) == "Inactive");
+    CHECK(t12::residentCount() == 1);
+
+    // Repeated actions against terminal requests are refused every time.
+    for (int attempt = 0; attempt < 3; ++attempt)
+    {
+        for (int id : {completedId, cancelledId})
+        {
+            const std::string idText = std::to_string(id);
+            CHECK(t13::start(idText)->statusCode() == k409Conflict);
+            CHECK(t13::complete(idText)->statusCode() == k409Conflict);
+            CHECK(t13::cancel(idText)->statusCode() == k409Conflict);
+            const std::string page = t12::bodyOf(t13::details(idText));
+            CHECK(!t12::contains(page, t13::actionPath(id, "start")));
+            CHECK(!t12::contains(page, t13::actionPath(id, "complete")));
+            CHECK(!t12::contains(page, t13::actionPath(id, "cancel")));
+        }
+        CHECK(t15::persistedState() == afterFirst);
+    }
+    CHECK(t13::statusOf(completedId) == "Completed");
+    CHECK(t13::statusOf(cancelledId) == "Cancelled");
+
+    // Reading the dashboard repeatedly gives the same numbers each time.
+    const auto s1 = t14::summary();
+    const auto s2 = t14::summary();
+    CHECK(s1.residents.inactive == 1);
+    CHECK(s1.serviceRequests.open == 0);
+    CHECK(s1.serviceRequests.total == s2.serviceRequests.total);
+    CHECK(s1.serviceRequests.completed == 1);
+    CHECK(s1.serviceRequests.cancelled == 1);
+}
+
+// Additional T15 coverage (supports the Resident search hardening): LIKE
+// wildcards, the escape character and SQL text typed into the search box are
+// plain data. Resident search now treats them literally, as Service Request
+// search (T11) already did.
+DROGON_TEST(T15ResidentSearchTreatsSpecialCharactersAsLiteralTextTest)
+{
+    Database db(makeTempDbPath("t15_resident_search_literal"));
+    ResidentRepository repository(db);
+    ResidentSearchService search(repository);
+
+    auto save = [&](const std::string &first, const std::string &last) {
+        return repository.save(Resident(first, last, "12 Rizal Street", "09171234567", "a@example.com",
+                                   ResidentStatus::Active))
+            .getId()
+            .value();
+    };
+    const int percentId = save("Maria", "100%Santos");
+    const int underscoreId = save("Juan", "De_La_Cruz");
+    const int backslashId = save("Ana", "Re\\yes");
+    const int plainId = save("Pedro", "Cruz");
+
+    auto idsFor = [&](const std::string &term) {
+        std::vector<int> ids;
+        for (const auto &resident : search.searchResidents(term))
+        {
+            ids.push_back(resident.getId().value());
+        }
+        return ids;
+    };
+
+    CHECK(idsFor("%") == std::vector<int>{percentId});
+    CHECK(idsFor("_") == std::vector<int>{underscoreId});
+    CHECK(idsFor("\\") == std::vector<int>{backslashId});
+    CHECK(idsFor("De_La") == std::vector<int>{underscoreId});
+    CHECK(idsFor("D_ La").empty());
+    CHECK(idsFor("' OR 1=1 --").empty());
+    CHECK(idsFor("x'; DROP TABLE residents; --").empty());
+
+    // Ordinary partial, case-insensitive search (T05) is unchanged, and the
+    // table is still intact after the hostile terms above.
+    const std::vector<int> expectedCruz = {plainId, underscoreId}; // ordered by last name
+    CHECK(idsFor("CRUZ") == expectedCruz);
+    CHECK(search.searchResidents("").size() == 4);
+    CHECK(repository.countAll() == 4);
+}
+
+// Additional T15 coverage: an unexpected internal failure must produce a
+// generic 500 page that names no exception text, SQL or file path.
+DROGON_TEST(T15UnexpectedFailureResponseRevealsNoInternalsTest)
+{
+    HttpResponsePtr response;
+    controller_support::handleUnexpectedException(
+        std::runtime_error("Failed to open SQLite database C:\\secret\\csms.sqlite3: SELECT * FROM residents"),
+        t12::makeRequest(Get, {}),
+        [&](const HttpResponsePtr &r) { response = r; });
+
+    REQUIRE(response != nullptr);
+    CHECK(response->statusCode() == k500InternalServerError);
+    const std::string body = t12::bodyOf(response);
+    CHECK(t12::contains(body, "Something Went Wrong"));
+    CHECK(!t12::contains(body, "SQLite"));
+    CHECK(!t12::contains(body, "secret"));
+    CHECK(!t12::contains(body, "SELECT"));
+    CHECK(t12::contains(body, "href=\"/dashboard\""));
+    CHECK(t12::contains(body, "href=\"/residents\""));
+    CHECK(t12::contains(body, "href=\"/service-requests\""));
 }
 
 // Keeping the original starter test so existing behavior is preserved.
