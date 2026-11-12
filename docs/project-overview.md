@@ -17,11 +17,11 @@ The project will be developed incrementally throughout the semester using sprint
 
 ## Current Version
 
-0.1.0
+1.0.0 (defined once in `AppInfo.h`)
 
 ## Current Sprint
 
-Sprint 0 – Developer Onboarding
+Sprint 6 – Final Release
 
 ## Project Goal
 

@@ -62,9 +62,10 @@ http://127.0.0.1:8080/health
 Expected response:
 
 {
-  "application": "Community Services Management System",
-  "status": "ok",
-  "version": "0.1.0"
+  "application": "CSMS",
+  "name": "Community Services Management System",
+  "status": "OK",
+  "version": "1.0.0"
 }
 
 You may also test it using:
@@ -468,9 +469,10 @@ http://127.0.0.1:8080/health
 Expected:
 
 {
-  "application": "Community Services Management System",
-  "status": "ok",
-  "version": "0.1.0"
+  "application": "CSMS",
+  "name": "Community Services Management System",
+  "status": "OK",
+  "version": "1.0.0"
 }
 Tests
 ctest --test-dir build --output-on-failure
